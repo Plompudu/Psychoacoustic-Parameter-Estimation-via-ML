@@ -82,37 +82,37 @@ def low_shelf(fs, f0, S, gain_db):
     return np.array([b0, b1, b2]), np.array([a0, a1, a2])
 
 
-def ten_band_parametric_eq(signal, fs, bands):
+def three_band_parametric_eq(signal, fs, bands):
     """
     bands: list of dicts like:
     {
         "type": "bell" | "low_shelf" | "high_shelf",
         "f0": frequency,
         "gain_db": gain,
-        "Q": quality (for bell) OR "S" for shelves
+        "Q": width
     }
     """
+    filters = {
+        "bell": peaking_eq,
+        "low_shelf": low_shelf,
+        "high_shelf": high_shelf,
+    }
+
     out = signal.copy()
 
-    for b in bands:
-        if b["type"] == "bell":
-            bq, aq = peaking_eq(fs, b["f0"], b.get("Q", 1.0), b["gain_db"])
-
-        elif b["type"] == "low_shelf":
-            bq, aq = low_shelf(fs, b["f0"], b.get("S", 1.0), b["gain_db"])
-
-        elif b["type"] == "high_shelf":
-            bq, aq = high_shelf(fs, b["f0"], b.get("S", 1.0), b["gain_db"])
-
-        else:
-            raise ValueError("Unknown filter type")
-
+    for band in bands:
+        bq, aq = filters[band["type"]](
+            fs,
+            band["f0"],
+            band.get("Q", 1.0),
+            band["gain_db"],
+        )
         out = _biquad_filter(out, bq, aq)
 
     return out
 
 
-def compressor(signal, threshold_db=-20, ratio=4, attack=0.01, release=0.1, fs=44100):
+def compressor(signal, threshold_db=-20, ratio=4, attack=0.01, release=0.1, fs=48000):
     """
     Simple feed-forward compressor using RMS detection.
     """
@@ -146,5 +146,29 @@ def compressor(signal, threshold_db=-20, ratio=4, attack=0.01, release=0.1, fs=4
 
     return out
 
-def generate_randomized_training_set_with_applied_filters():
+def generate_randomized_training_set_with_applied_filters(input_folder, output_folder, number_of_samples):
+
+
+    #generate random parameter set
+    DB_GAIN_RANGE = (-40, 40)
+    THRESHOLD_DB_RANGE = (-20, 10)
+    RATIO_RANGE = (1, 10)
+    ATTACK_RANGE = (0.01, 0.1)
+    RELEASE_RANGE = (0.1, 1)
+    TYPE_RANGE = ["bell", "low_shelf", "high_shelf"]
+    F0_RANGE = (20, 20000)
+    GAIN_DB_RANGE = (-40, 40)
+    Q_RANGE = (0.1, 10)
+
+    # load files
+    #apply random parameters per file
+    filtered_signal = gain(signal=signal, db_gain=db_gain)
+    filtered_signal = compressor(signal=filtered_signal, threshold_db=threshold_db, ratio=ratio, attack=attack, release=release, fs=48000)
+    bands = [
+        {"type": type_1, "f0": f0_1, "gain_db": gain_db_1, "Q": Q_1},
+        {"type": type_2, "f0": f0_2, "gain_db": gain_db_2, "Q": Q_2},
+        {"type": type_3, "f0": f0_3, "gain_db": gain_db_3, "Q": Q_3},
+    ]
+    filtered_signal = three_band_parametric_eq(signal=filtered_signal, fs=48000, bands=bands)
+    # save filtered_signal at output_path
     return
