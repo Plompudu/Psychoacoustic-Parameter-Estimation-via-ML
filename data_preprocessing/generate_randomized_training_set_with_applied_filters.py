@@ -1,5 +1,17 @@
 import numpy as np
 from math import sin, cos, log10, sqrt, pi
+from pathlib import Path
+import soundfile as sf
+import pandas as pd
+import random
+import time
+import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
+
+RED = "\033[91m"
+GREEN = "\033[92m"
+BLUE = "\033[94m"
+RESET = "\033[0m"
 
 
 def gain(signal, db_gain: float):
@@ -146,10 +158,54 @@ def compressor(signal, threshold_db=-20, ratio=4, attack=0.01, release=0.1, fs=4
 
     return out
 
+
+def _process_sample(src_path_str, sample_idx, output_folder_str, config):
+    t0 = time.perf_counter()
+    signal, fs = sf.read(src_path_str)
+    if signal.ndim > 1:
+        signal = signal[:, 0]
+
+    filtered = gain(signal, config["db_gain"])
+    filtered = compressor(filtered, config["threshold_db"], config["ratio"],
+                          config["attack"], config["release"], fs)
+
+    bands = [
+        {"type": config[f"type_{i}"], "f0": config[f"f0_{i}"],
+         "gain_db": config[f"gain_db_{i}"], "Q": config[f"Q_{i}"]}
+        for i in range(1, 4)
+    ]
+    filtered = three_band_parametric_eq(filtered, fs, bands)
+
+    out_name = f"filtered_{sample_idx:06d}.wav"
+    sf.write(Path(output_folder_str) / out_name, filtered, fs)
+    elapsed = time.perf_counter() - t0
+    return out_name, Path(src_path_str).name, sample_idx, elapsed
+
+
+class _ColorStdout:
+    def __init__(self, original):
+        self.original = original
+
+    def write(self, text):
+        if text.startswith("[Warning]"):
+            text = f"{BLUE}{text}{RESET}"
+        self.original.write(text)
+
+    def flush(self):
+        self.original.flush()
+
+
 def generate_randomized_training_set_with_applied_filters(input_folder, output_folder, number_of_samples):
+    sys.stdout = _ColorStdout(sys.stdout)
+    input_folder = Path(input_folder)
+    output_folder = Path(output_folder)
+    output_folder.mkdir(parents=True, exist_ok=True)
 
+    wav_files = sorted(input_folder.glob("*.wav"))
+    if not wav_files:
+        print(f"{RED}No WAV files found in input folder.{RESET}")
+        return
 
-    #generate random parameter set
     DB_GAIN_RANGE = (-40, 40)
     THRESHOLD_DB_RANGE = (-20, 10)
     RATIO_RANGE = (1, 10)
@@ -160,15 +216,50 @@ def generate_randomized_training_set_with_applied_filters(input_folder, output_f
     GAIN_DB_RANGE = (-40, 40)
     Q_RANGE = (0.1, 10)
 
-    # load files
-    #apply random parameters per file
-    filtered_signal = gain(signal=signal, db_gain=db_gain)
-    filtered_signal = compressor(signal=filtered_signal, threshold_db=threshold_db, ratio=ratio, attack=attack, release=release, fs=48000)
-    bands = [
-        {"type": type_1, "f0": f0_1, "gain_db": gain_db_1, "Q": Q_1},
-        {"type": type_2, "f0": f0_2, "gain_db": gain_db_2, "Q": Q_2},
-        {"type": type_3, "f0": f0_3, "gain_db": gain_db_3, "Q": Q_3},
-    ]
-    filtered_signal = three_band_parametric_eq(signal=filtered_signal, fs=48000, bands=bands)
-    # save filtered_signal at output_path
-    return
+    configs = []
+    for src_path in wav_files:
+        for _ in range(number_of_samples):
+            configs.append({
+                "source": src_path.name,
+                "src_path": str(src_path),
+                "db_gain": random.uniform(*DB_GAIN_RANGE),
+                "threshold_db": random.uniform(*THRESHOLD_DB_RANGE),
+                "ratio": random.uniform(*RATIO_RANGE),
+                "attack": random.uniform(*ATTACK_RANGE),
+                "release": random.uniform(*RELEASE_RANGE),
+                **{f"type_{i}": random.choice(TYPE_RANGE) for i in range(1, 4)},
+                **{f"f0_{i}": random.uniform(*F0_RANGE) for i in range(1, 4)},
+                **{f"gain_db_{i}": random.uniform(*GAIN_DB_RANGE) for i in range(1, 4)},
+                **{f"Q_{i}": random.uniform(*Q_RANGE) for i in range(1, 4)},
+            })
+
+    output_folder_str = str(output_folder)
+
+    with ProcessPoolExecutor(max_workers=10) as executor:
+        futures = []
+        for sidx, cfg in enumerate(configs):
+            future = executor.submit(
+                _process_sample, cfg["src_path"], sidx, output_folder_str, cfg
+            )
+            futures.append(future)
+
+        metadata_rows = []
+        for future in as_completed(futures):
+            try:
+                out_name, src_name, sidx, elapsed = future.result()
+                print(f"[{sidx:06d}] {src_name} -> {out_name}: {elapsed:.4f}s")
+            except Exception as e:
+                print(f"{RED}[???] Worker failed: {e}{RESET}", flush=True)
+            metadata_rows.append((sidx, out_name, src_name))
+
+    metadata_rows.sort(key=lambda r: r[0])
+    rows = []
+    for sidx, out_name, _ in metadata_rows:
+        row = {"filename": out_name}
+        row.update({k: v for k, v in configs[sidx].items() if k != "src_path"})
+        rows.append(row)
+
+    df = pd.DataFrame(rows)
+    csv_path = output_folder / "filter_parameters.csv"
+    df.to_csv(csv_path, index=False)
+    print(f"{GREEN}Saved: {csv_path}{RESET}")
