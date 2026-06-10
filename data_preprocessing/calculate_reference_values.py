@@ -44,6 +44,9 @@ def _compute_param(name, param_name, fn, audio_path_str, *args, **kwargs):
     signal, sr = sf.read(audio_path)
     np.seterr(invalid='ignore', divide='ignore')
 
+    if param_name == "sharpness_din_tv" and "_00000-" in audio_path.stem:
+        kwargs = {k: v for k, v in kwargs.items() if k != "skip"}
+
     t0 = time.perf_counter()
     try:
         result, *_ = fn(signal, sr, *args, **kwargs)
@@ -93,15 +96,21 @@ def calculate_reference_values(input_folder: Path, output_folder: Path):
 
     with ProcessPoolExecutor(max_workers=10) as executor:
         fut_to_info = {}
+        submitted_count = {}
         for p_str in audio_path_strs:
             name = Path(p_str).stem
+            output_file = output_folder / f"{name}.csv"
+            if output_file.exists():
+                print(f"Skipping (already exists): {output_file.name}")
+                continue
+            submitted_count[name] = 0
             for param_name, fn, args, kwargs in PARAM_CONFIGS:
                 future = executor.submit(
                     _compute_param, name, param_name, fn, p_str, *args, **kwargs
                 )
                 fut_to_info[future] = (name, param_name)
+                submitted_count[name] += 1
 
-        n_params = len(PARAM_CONFIGS)
         file_results = {}
         remaining = {}
 
@@ -116,7 +125,7 @@ def calculate_reference_values(input_folder: Path, output_folder: Path):
                 file_results.setdefault(name, {})[param_name] = None
                 print(f"{RED}Failed {name}/{param_name}: {e}{RESET}")
 
-            rem = remaining.get(name, n_params) - 1
+            rem = remaining.get(name, submitted_count[name]) - 1
             remaining[name] = rem
 
             if rem == 0:
@@ -128,9 +137,10 @@ def calculate_reference_values(input_folder: Path, output_folder: Path):
                 ]
 
                 max_len = max(len(a) for a in arrays)
+                prepend_sharpness = "_00000-" not in name
                 N, S, R, TNR, SII = (
                     _pad(arrays[0], max_len),
-                    _pad(arrays[1], max_len, sharpness_prepend_SHARPNESS_SKIP_FIRST_N_VALUES=True),
+                    _pad(arrays[1], max_len, sharpness_prepend_SHARPNESS_SKIP_FIRST_N_VALUES=prepend_sharpness),
                     _pad(arrays[2], max_len),
                     _pad(arrays[3], max_len),
                     _pad(arrays[4], max_len),

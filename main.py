@@ -14,11 +14,11 @@ from pathlib import Path
 
 
 def main():
-    # convert_to_wav(
-    #     input_folder=Path("data") / "raw_audio_files",
-    #     output_folder=Path("data") / "standardized_audio_files" / "training_set",
-    #     fs=48000
-    # )
+    convert_to_wav(
+        input_folder=Path("data") / "raw_audio_files",
+        output_folder=Path("data") / "standardized_audio_files" / "training_set",
+        fs=48000
+    )
 
     calculate_reference_values(
         input_folder=Path("data") / "standardized_audio_files" / "training_set",

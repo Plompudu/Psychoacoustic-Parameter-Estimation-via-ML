@@ -4,11 +4,16 @@ import soundfile as sf
 import numpy as np
 
 
+
+SHARPNESS_FRAME_S = 0.002
+
+
 def convert_to_wav(input_folder: Path, output_folder: Path, fs=48000):
     """
     Convert all audio files in input_folder to WAV format
     with sampling rate fs and save them in output_folder.
-    Split into 5s windows with 50% overlap using a Hann window.
+    Split into 5s windows with 0.01s overlap (5 sharpness frames)
+    to ensure full coverage after the sharpness skip.
     Skip already generated audio files.
     """
 
@@ -18,7 +23,7 @@ def convert_to_wav(input_folder: Path, output_folder: Path, fs=48000):
     }
 
     win_length = int(5 * fs)
-    hop_length = win_length // 2
+    hop_length = win_length - int(SHARPNESS_FRAME_S * 5 * fs)
 
     for file_path in input_folder.iterdir():
         if not (file_path.is_file() and file_path.suffix.lower() in audio_extensions):
