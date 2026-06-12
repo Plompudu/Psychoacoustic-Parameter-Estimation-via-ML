@@ -30,7 +30,7 @@ def main():
         labels_dir=Path("data") / "standardized_audio_files" / "training_set" / "psycho_acoustic_parameter_labels",
         checkpoint_dir=Path("DL_model") / "epochs",
         losses_dir=Path("DL_model") / "losses",
-        epochs=10,
+        epochs=20,
         lr=1e-3,
         batch_size=16,
         n_samples_final_comparison=1

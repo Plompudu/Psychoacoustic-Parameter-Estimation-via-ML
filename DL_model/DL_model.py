@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from .params import PARAM_NAMES
 
@@ -15,7 +14,7 @@ class PsychoacousticModel(nn.Module):
     target dimension without further alignment.
     """
 
-    def __init__(self):
+    def __init__(self, param_frame_counts: dict[str, int] | None = None):
         super().__init__()
         self.backbone = nn.Sequential(
             nn.Conv1d(1, 16, kernel_size=7, stride=2, padding=3),
@@ -26,24 +25,16 @@ class PsychoacousticModel(nn.Module):
             nn.ReLU(),
         )
 
-        self.heads = nn.ModuleDict({
-            name: nn.Conv1d(64, 1, kernel_size=1) for name in PARAM_NAMES
-        })
+        self.heads = nn.ModuleDict()
+        for name in PARAM_NAMES:
+            layers = [nn.Conv1d(64, 1, kernel_size=1)]
+            if param_frame_counts is not None and name in param_frame_counts:
+                layers.append(nn.AdaptiveAvgPool1d(param_frame_counts[name]))
+            self.heads[name] = nn.Sequential(*layers)
 
-    def forward(
-        self,
-        waveform: torch.Tensor,
-        target_n_frames: dict[str, int] | None = None,
-    ) -> dict[str, torch.Tensor]:
+    def forward(self, waveform: torch.Tensor) -> dict[str, torch.Tensor]:
         features = self.backbone(waveform)           # (B, 64, T_backbone)
         outputs: dict[str, torch.Tensor] = {}
         for name in PARAM_NAMES:
-            out = self.heads[name](features)         # (B, 1, T_backbone)
-            if target_n_frames is not None and name in target_n_frames:
-                n = target_n_frames[name]
-                if out.shape[-1] != n:
-                    out = F.interpolate(
-                        out, size=n, mode="linear"
-                    )
-            outputs[name] = out.squeeze(1)           # (B, n_frames_param)
+            outputs[name] = self.heads[name](features).squeeze(1)
         return outputs

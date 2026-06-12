@@ -102,10 +102,8 @@ def _training_step(
     targets: dict[str, torch.Tensor],
     optimizer: torch.optim.Optimizer,
 ) -> dict[str, float]:
-    target_n_frames = {name: _valid_frame_count(targets[name])
-                       for name in PARAM_NAMES}
-    preds = model(waveform, target_n_frames=target_n_frames)
-    trimmed = {name: targets[name][:, :target_n_frames[name]]
+    preds = model(waveform)
+    trimmed = {name: targets[name][:, :preds[name].shape[-1]]
                for name in PARAM_NAMES}
     losses = compute_loss(model, preds, trimmed)
     optimizer.zero_grad()
@@ -202,7 +200,12 @@ def _compare_predictions(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    model = PsychoacousticModel().to(device)
+    pairs = _load_pairs(sound_dir, labels_dir)
+    param_frame_counts = {
+        name: max(_valid_frame_count(p[1][name]) for p in pairs)
+        for name in PARAM_NAMES
+    }
+    model = PsychoacousticModel(param_frame_counts=param_frame_counts).to(device)
     ckpt_files = sorted(Path(checkpoint_dir).glob("epoch_*.pt"))
     if not ckpt_files:
         print("No checkpoint found — skipping comparison")
@@ -213,7 +216,6 @@ def _compare_predictions(
     model.eval()
     print(f"Loaded {latest.name} for comparison")
 
-    pairs = _load_pairs(sound_dir, labels_dir)
     csv_paths = sorted(Path(labels_dir).glob("*.csv"))
     zipped = list(zip(pairs, csv_paths))
     random.shuffle(zipped)
@@ -223,10 +225,8 @@ def _compare_predictions(
         for (waveform, target), csv_path in zipped:
             import time
             inp = waveform.unsqueeze(0).to(device)
-            target_n_frames = {name: _valid_frame_count(target[name])
-                               for name in PARAM_NAMES}
             t0 = time.perf_counter()
-            preds = model(inp, target_n_frames=target_n_frames)
+            preds = model(inp)
             elapsed = time.perf_counter() - t0
             stem = csv_path.stem
 
@@ -282,9 +282,6 @@ def train_model(
 ) -> list[dict[str, float]]:
     device = _get_device(device_id)
 
-    model = PsychoacousticModel().to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-
     checkpoint_dir = Path(checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     losses_dir = Path(losses_dir)
@@ -298,6 +295,14 @@ def train_model(
         print("No data found — nothing to train on.")
         return []
     print(f"Loaded {len(pairs)} audio-label pair(s)")
+
+    # ── Compute per-parameter frame counts from data ──
+    param_frame_counts = {
+        name: max(_valid_frame_count(p[1][name]) for p in pairs)
+        for name in PARAM_NAMES
+    }
+    model = PsychoacousticModel(param_frame_counts=param_frame_counts).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
     # ── Resume from latest checkpoint ──
     start_epoch, history = _resume_checkpoint(model, optimizer, checkpoint_dir, device)
