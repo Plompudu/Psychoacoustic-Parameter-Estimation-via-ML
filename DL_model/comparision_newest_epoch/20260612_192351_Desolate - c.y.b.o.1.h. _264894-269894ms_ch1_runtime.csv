@@ -1,6 +1,0 @@
-file,input_samples,input_duration_s,inference_time_ms,backbone_frames,parameter,output_frames,pred_min,pred_max,pred_mean
-Desolate - c.y.b.o.1.h. _264894-269894ms_ch1.wav,240000,5.0,4.08,3750,loudness_zwtv,2500,1.435371,64.655685,50.213764
-Desolate - c.y.b.o.1.h. _264894-269894ms_ch1.wav,240000,5.0,4.08,3750,sharpness_din_tv,2500,0.639553,2.609262,1.50572
-Desolate - c.y.b.o.1.h. _264894-269894ms_ch1.wav,240000,5.0,4.08,3750,roughness_dw,49,0.088917,0.158419,0.117581
-Desolate - c.y.b.o.1.h. _264894-269894ms_ch1.wav,240000,5.0,4.08,3750,tnr_ecma_perseg,10,-0.797159,3.81626,0.670081
-Desolate - c.y.b.o.1.h. _264894-269894ms_ch1.wav,240000,5.0,4.08,3750,sii_ansi,1,0.007227,0.007227,0.007227
