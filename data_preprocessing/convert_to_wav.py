@@ -6,9 +6,9 @@ import numpy as np
 
 
 SHARPNESS_FRAME_S = 0.002
+SHARPNESS_OVERLAP_S = SHARPNESS_FRAME_S * 5
 
-
-def convert_to_wav(input_folder: Path, output_folder: Path, fs=48000):
+def convert_to_wav(input_folder: Path, output_folder: Path, fs=48000, win_length_samples=5):
     """
     Convert all audio files in input_folder to WAV format
     with sampling rate fs and save them in output_folder.
@@ -22,8 +22,9 @@ def convert_to_wav(input_folder: Path, output_folder: Path, fs=48000):
         ".ogg", ".wma", ".wav"
     }
 
-    win_length = int(5 * fs)
-    hop_length = win_length - int(SHARPNESS_FRAME_S * 5 * fs)
+    win_length_samples = int(win_length_samples * fs)
+    sharpness_length_samples = int(SHARPNESS_FRAME_S * fs)
+    hop_length = win_length_samples - sharpness_length_samples
 
     for file_path in input_folder.iterdir():
         if not (file_path.is_file() and file_path.suffix.lower() in audio_extensions):
@@ -39,7 +40,7 @@ def convert_to_wav(input_folder: Path, output_folder: Path, fs=48000):
             n_channels, n_samples = audio.shape
             base_name = file_path.stem
 
-            if n_samples <= win_length:
+            if n_samples <= win_length_samples:
                 duration_ms = int(n_samples / fs * 1000)
                 for ch_idx in range(n_channels):
                     output_path = output_folder / f"{base_name}_00000-{duration_ms:05d}ms.wav"
@@ -51,11 +52,11 @@ def convert_to_wav(input_folder: Path, output_folder: Path, fs=48000):
                     sf.write(output_path, audio[ch_idx], fs)
                     print(f"Converted: {file_path.name} -> {output_path.name}")
             else:
-                n_windows = (n_samples - win_length) // hop_length + 1
+                n_windows = (n_samples - win_length_samples) // hop_length + 1
 
                 for win_idx in range(n_windows):
                     start_sample = win_idx * hop_length
-                    end_sample = start_sample + win_length
+                    end_sample = start_sample + win_length_samples
                     start_ms = int(start_sample / fs * 1000)
                     end_ms = int(end_sample / fs * 1000)
 
