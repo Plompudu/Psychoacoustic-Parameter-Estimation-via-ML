@@ -94,12 +94,15 @@ def _collate(
         batch_waveforms.append(w)
     waveform_batch = torch.stack(batch_waveforms, dim=0).to(device)
 
-    max_frames = max(p[1][PARAM_NAMES[0]].shape[-1] for p in pairs)
+    max_frames = {
+        name: max(p[1][name].shape[-1] for p in pairs)
+        for name in PARAM_NAMES
+    }
     target_batch: dict[str, list[torch.Tensor]] = {n: [] for n in PARAM_NAMES}
     for p in pairs:
         for name in PARAM_NAMES:
             t = p[1][name]
-            pad = max_frames - t.shape[-1]
+            pad = max_frames[name] - t.shape[-1]
             if pad > 0:
                 t = torch.nn.functional.pad(t, (0, pad), value=float("nan"))
             target_batch[name].append(t)
@@ -111,6 +114,7 @@ def _collate(
 
 
 def _valid_frame_count(t: torch.Tensor) -> int:
+    """Number of non-NaN frames from the start."""
     valid = ~torch.isnan(t)
     idxs = torch.where(valid.any(dim=0) if t.ndim == 2 else valid)[0]
     return idxs[-1].item() + 1 if len(idxs) > 0 else 1
@@ -122,6 +126,7 @@ def _training_step(
     targets: dict[str, torch.Tensor],
     optimizer: torch.optim.Optimizer,
 ) -> dict[str, float]:
+    """Single forward-backward-update step for one batch."""
     preds = model(waveform)
     trimmed = {name: targets[name][:, :preds[name].shape[-1]]
                for name in PARAM_NAMES}
@@ -137,6 +142,7 @@ def _resume_checkpoint(
     optimizer: torch.optim.Optimizer,
     checkpoint_dir: Path,
 ) -> tuple[int, list[dict[str, float]]]:
+    """Load the latest checkpoint if available, else start from scratch."""
     ckpt_files = sorted(checkpoint_dir.glob("epoch_*.pt"))
     if not ckpt_files:
         return 0, []
@@ -154,6 +160,7 @@ def _resume_checkpoint(
 
 
 def _save_runtime_csv(output_dir: Path, stem: str, meta: dict, preds: dict[str, torch.Tensor]):
+    """Save per-parameter prediction statistics to CSV."""
     rows = []
     for name in PARAM_NAMES:
         p = preds[name][0]
@@ -169,6 +176,7 @@ def _save_runtime_csv(output_dir: Path, stem: str, meta: dict, preds: dict[str, 
 
 
 def _save_prediction_plots(output_dir: Path, stem: str, preds: dict[str, torch.Tensor], target: dict[str, torch.Tensor]):
+    """Plot prediction vs target for each parameter and save as PNG."""
     for name in PARAM_NAMES:
         p = preds[name][0]
         t = target[name][:p.shape[-1]]
@@ -192,6 +200,7 @@ def _save_prediction_plots(output_dir: Path, stem: str, preds: dict[str, torch.T
 
 
 def _save_comparison_csv(output_dir: Path, stem: str, preds: dict[str, torch.Tensor], target: dict[str, torch.Tensor]):
+    """Save side-by-side target vs prediction values for all params as CSV."""
     all_arrays: dict[str, np.ndarray] = {}
     for name in PARAM_NAMES:
         p = preds[name][0]
@@ -214,6 +223,7 @@ def _compare_predictions(
     n_samples: int = 1,
     device: torch.device | None = None,
 ):
+    """Run inference on random samples and save plots + CSVs."""
     if device is None:
         device = _get_device()
     output_dir = Path(output_dir)
@@ -242,7 +252,6 @@ def _compare_predictions(
 
     with torch.no_grad():
         for (waveform, target), csv_path in zipped:
-            import time
             inp = waveform.unsqueeze(0).to(device)
             t0 = time.perf_counter()
             preds = model(inp)
@@ -262,6 +271,21 @@ def _compare_predictions(
     print(f"Comparison saved to {output_dir}")
 
 
+def run_comparison(
+    sound_dir: Path,
+    labels_dir: Path,
+    checkpoint_dir: Path,
+    n_samples: int = 1,
+    device_id: int = 0,
+):
+    """Run inference on random samples and save plots/CSVs to comparison_newest_epoch/."""
+    print("=" * 100)
+    device = _get_device(device_id)
+    output_dir = Path(__file__).resolve().parent / "comparison_newest_epoch"
+    _compare_predictions(sound_dir, labels_dir, checkpoint_dir, output_dir, n_samples, device=device)
+    hold_plot()
+
+
 def _log_epoch(
     epoch: int,
     avg_losses: dict[str, float],
@@ -272,6 +296,7 @@ def _log_epoch(
     plot_path: Path,
     checkpoint_dir: Path,
 ):
+    """Save loss row, update plot, and write checkpoint."""
     row = {"epoch": epoch + 1, **avg_losses}
     pd.DataFrame([row]).to_csv(csv_path, mode="a", header=not csv_path.exists(), index=False)
     plot_losses(csv_path, plot_path)
@@ -296,9 +321,9 @@ def train_model(
     epochs: int = 2,
     lr: float = 1e-3,
     batch_size: int = 2,
-    n_samples_final_comparison: int = 1,
     device_id: int = 0,
 ) -> list[dict[str, float]]:
+    print("=" * 100)
     device = _get_device(device_id)
 
     checkpoint_dir = Path(checkpoint_dir)
@@ -324,7 +349,7 @@ def train_model(
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
     # ── Resume from latest checkpoint ──
-    start_epoch, history = _resume_checkpoint(model, optimizer, checkpoint_dir, device)
+    start_epoch, history = _resume_checkpoint(model, optimizer, checkpoint_dir)
     if start_epoch == 0:
         csv_path.unlink(missing_ok=True)
         print("Starting from scratch")
@@ -355,11 +380,4 @@ def train_model(
 
         _log_epoch(epoch, avg_losses, model, optimizer, history, csv_path, plot_path, checkpoint_dir)
 
-    _compare_predictions(
-        sound_dir, labels_dir, checkpoint_dir,
-        Path(__file__).resolve().parent / "comparision_newest_epoch",
-        n_samples_final_comparison,
-        device=device,
-    )
-    hold_plot()
     return history

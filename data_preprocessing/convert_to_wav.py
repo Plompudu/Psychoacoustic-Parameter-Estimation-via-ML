@@ -16,6 +16,7 @@ def convert_to_wav(input_folder: Path, output_folder: Path, fs=48000, win_length
     to ensure full coverage after the sharpness skip.
     Skip already generated audio files.
     """
+    print("=" * 100)
 
     audio_extensions = {
         ".mp3", ".flac", ".m4a", ".aac",

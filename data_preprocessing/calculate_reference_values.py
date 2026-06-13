@@ -89,6 +89,7 @@ def calculate_reference_values(input_folder: Path, output_folder: Path):
     All parameter computations across all files are submitted to a
     10-process pool and run concurrently.
     """
+    print("=" * 100)
     sys.stdout = _ColorStdout(sys.stdout)
     output_folder.mkdir(parents=True, exist_ok=True)
 

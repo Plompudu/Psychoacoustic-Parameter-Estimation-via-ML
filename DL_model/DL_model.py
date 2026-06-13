@@ -41,8 +41,10 @@ class PsychoacousticModel(nn.Module):
             )
 
     def forward(self, waveform: torch.Tensor) -> dict[str, torch.Tensor]:
-        features = self.backbone(waveform)           # (B, 64, T_backbone)
-        outputs: dict[str, torch.Tensor] = {}
+        final_outputs: dict[str, torch.Tensor] = {}
+
+        backbone_output = self.backbone(waveform)           # (B, 64, T_backbone)
         for name in PARAM_NAMES:
-            outputs[name] = self.heads[name](features).squeeze(1)
-        return outputs
+            final_outputs[name] = self.heads[name](backbone_output).squeeze(1)
+
+        return final_outputs
