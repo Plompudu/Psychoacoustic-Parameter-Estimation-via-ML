@@ -7,11 +7,19 @@ from .params import PARAM_NAMES
 class PsychoacousticModel(nn.Module):
     """Per-parameter time-varying predictions at native target resolution.
 
-    A shared backbone extracts features at ~T/8 temporal resolution with
-    64 channels.  Each parameter has a dedicated head that adaptively
-    pools to the exact number of frames the reference algorithm produces
-    (e.g. 2500 for loudness vs 1 for SII), so every output matches its
-    target dimension without further alignment.
+    Uses a shared backbone + per-parameter heads instead of a single
+    monolithic model.  The backbone is the heavy feature extractor (3
+    Conv1D layers, run once per sample), while each head is a cheap 1x1
+    Conv + AdaptiveAvgPool1d that reads out different views of those
+    features at different temporal resolutions.
+
+    Benefits of this split:
+      - Efficiency: backbone runs once per waveform, not once per param.
+      - Flexibility: adding a new parameter means adding a tiny head
+        without retraining the backbone from scratch.
+      - No alignment boilerplate: each head adaptively pools to the
+        exact frame count its reference algorithm produces (e.g. ~2500
+        frames for loudness vs 1 scalar for SII).
     """
 
     def __init__(self, param_frame_counts: dict[str, int] | None = None):
@@ -27,10 +35,10 @@ class PsychoacousticModel(nn.Module):
 
         self.heads = nn.ModuleDict()
         for name in PARAM_NAMES:
-            layers = [nn.Conv1d(64, 1, kernel_size=1)]
-            if param_frame_counts is not None and name in param_frame_counts:
-                layers.append(nn.AdaptiveAvgPool1d(param_frame_counts[name]))
-            self.heads[name] = nn.Sequential(*layers)
+            self.heads[name] = nn.Sequential(
+                nn.Conv1d(64, 1, kernel_size=1),
+                nn.AdaptiveAvgPool1d(param_frame_counts[name])
+            )
 
     def forward(self, waveform: torch.Tensor) -> dict[str, torch.Tensor]:
         features = self.backbone(waveform)           # (B, 64, T_backbone)

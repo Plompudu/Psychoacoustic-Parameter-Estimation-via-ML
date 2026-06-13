@@ -15,6 +15,15 @@ from visualize_training.visualize_training import hold_plot, plot_losses
 
 
 def _get_device(device_id: int = 0) -> torch.device:
+    """
+    Get a suitable PyTorch device based on the availability of CUDA or DirectML. Fallback to CPU if neither works.
+
+    Args:
+        device_id (int): The index of the device to use. Defaults to 0.
+
+    Returns:
+        torch.device: The device to be used.
+    """
     if torch.cuda.is_available():
         print(f"Available CUDA devices: {torch.cuda.device_count()}")
         for i in range(torch.cuda.device_count()):
@@ -35,9 +44,20 @@ def _get_device(device_id: int = 0) -> torch.device:
         return torch.device("cpu")
 
 
-def _load_pairs(
+def _load_audio_label_pairs(
     sound_dir: Path, labels_dir: Path
 ) -> list[tuple[torch.Tensor, dict[str, torch.Tensor]]]:
+    """
+    Load audio-label pairs from the given directories.
+
+    Args:
+        sound_dir (Path): The directory containing audio files.
+        labels_dir (Path): The directory containing label CSV files.
+
+    Returns:
+        list[tuple[torch.Tensor, dict[str, torch.Tensor]]]: A list of tuples, where each tuple contains a waveform
+            tensor and a dictionary of target tensors.
+    """
     pairs: list[tuple[torch.Tensor, dict[str, torch.Tensor]]] = []
     for csv_path in sorted(Path(labels_dir).glob("*.csv")):
         stem = csv_path.stem
@@ -54,15 +74,15 @@ def _load_pairs(
         df = pd.read_csv(csv_path)
         targets = {}
         for name in PARAM_NAMES:
-            arr = df[name].values.astype(np.float32)
-            targets[name] = torch.from_numpy(arr)
+            targets[name] = torch.from_numpy(df[name].values.astype(np.float32))
 
         pairs.append((waveform, targets))
     return pairs
 
 
 def _collate(
-    pairs: list[tuple[torch.Tensor, dict[str, torch.Tensor]]], device: torch.device
+    pairs: list[tuple[torch.Tensor, dict[str, torch.Tensor]]],
+    device: torch.device
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     waveforms = [p[0] for p in pairs]
     max_wav_len = max(w.shape[-1] for w in waveforms)
@@ -116,7 +136,6 @@ def _resume_checkpoint(
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
     checkpoint_dir: Path,
-    device: torch.device,
 ) -> tuple[int, list[dict[str, float]]]:
     ckpt_files = sorted(checkpoint_dir.glob("epoch_*.pt"))
     if not ckpt_files:
@@ -200,7 +219,7 @@ def _compare_predictions(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    pairs = _load_pairs(sound_dir, labels_dir)
+    pairs = _load_audio_label_pairs(sound_dir, labels_dir)
     param_frame_counts = {
         name: max(_valid_frame_count(p[1][name]) for p in pairs)
         for name in PARAM_NAMES
@@ -290,7 +309,7 @@ def train_model(
     plot_path = losses_dir / "losses.png"
 
     # ── Load dataset ──
-    pairs = _load_pairs(sound_dir, labels_dir)
+    pairs = _load_audio_label_pairs(sound_dir, labels_dir)
     if not pairs:
         print("No data found — nothing to train on.")
         return []
