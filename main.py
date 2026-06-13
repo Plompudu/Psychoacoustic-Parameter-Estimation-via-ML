@@ -24,7 +24,8 @@ def main():
         input_folder=raw_dir,
         output_folder=sound_dir,
         fs=48000,
-        win_length_samples=5
+        win_length_samples=5,
+        number_samples=32
     )
 
     calculate_reference_values(
@@ -37,7 +38,7 @@ def main():
         labels_dir=labels_dir,
         checkpoint_dir=checkpoint_dir,
         losses_dir=losses_dir,
-        epochs=20,
+        epochs=100,
         lr=1e-3,
         batch_size=16,
         device_id=0,
