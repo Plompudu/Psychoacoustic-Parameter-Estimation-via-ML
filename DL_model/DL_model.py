@@ -8,16 +8,14 @@ from .params import PARAM_NAMES
 class PsychoacousticModel(nn.Module):
     def __init__(
         self,
-        param_frame_counts: dict[str, int] | None = None,
         initial_temporal_biases: dict[str, torch.Tensor] | None = None,
     ):
         super().__init__()
         self.backbone = nn.Sequential(
-            # Stage 1
-            nn.Conv1d(1, 10, kernel_size=7, stride=2, padding=3),
+            # Stage 1 — no temporal compression, preserves full resolution
+            nn.Conv1d(1, 10, kernel_size=7, stride=1, padding=3),
             nn.BatchNorm1d(10),
             nn.ReLU(),
-            nn.MaxPool1d(kernel_size=2, stride=2),
             # Stage 2
             nn.Conv1d(10, 20, kernel_size=5, stride=1, padding=2),
             nn.BatchNorm1d(20),
@@ -40,31 +38,24 @@ class PsychoacousticModel(nn.Module):
             nn.MaxPool1d(kernel_size=2, stride=2),
         )
 
+        MAX = [500, 500, 9, 2, 1]
         self.heads = nn.ModuleDict()
-        for name in PARAM_NAMES:
-            T = param_frame_counts[name]
+        for i, name in enumerate(PARAM_NAMES):
             self.heads[name] = nn.Sequential(
                 nn.Conv1d(80, 1, kernel_size=1),
-                nn.AdaptiveAvgPool1d(T),
+                nn.AdaptiveAvgPool1d(MAX[i]),
             )
 
-            bias = torch.zeros(1, T)
+            bias = torch.zeros(1, MAX[i])
             if initial_temporal_biases is not None and name in initial_temporal_biases:
-                b = initial_temporal_biases[name]
-                if b.numel() > T:
-                    b = F.interpolate(b.view(1, 1, -1), size=T, mode="linear", align_corners=False).view(-1)
-                elif b.numel() < T:
-                    b = F.interpolate(b.view(1, 1, -1), size=T, mode="linear", align_corners=False).view(-1)
-                bias = b.view(1, -1)
+                bias = initial_temporal_biases[name].view(1, -1)
             self.register_parameter(f"{name}_bias", nn.Parameter(bias))
 
     def forward(self, waveform: torch.Tensor) -> dict[str, torch.Tensor]:
-        final_outputs: dict[str, torch.Tensor] = {}
-
         backbone_output = self.backbone(waveform)
+        final_outputs: dict[str, torch.Tensor] = {}
         for name in PARAM_NAMES:
             out = self.heads[name](backbone_output).squeeze(1)
             bias = getattr(self, f"{name}_bias")
             final_outputs[name] = out + bias
-
         return final_outputs

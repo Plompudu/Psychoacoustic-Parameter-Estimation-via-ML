@@ -1,0 +1,6 @@
+file,input_samples,input_duration_s,inference_time_ms,backbone_frames,parameter,output_frames,pred_min,pred_max,pred_mean
+[069516]_straight_m8_long_straight_a_07984-08984ms.wav,48000,1.0,1.13,3000,loudness_zwtv,500,-0.502713,12.022406,9.761953
+[069516]_straight_m8_long_straight_a_07984-08984ms.wav,48000,1.0,1.13,3000,sharpness_din_tv,495,0.870729,2.710409,1.06619
+[069516]_straight_m8_long_straight_a_07984-08984ms.wav,48000,1.0,1.13,3000,roughness_dw,9,0.082225,0.098243,0.08944
+[069516]_straight_m8_long_straight_a_07984-08984ms.wav,48000,1.0,1.13,3000,tnr_ecma_perseg,2,19.936592,21.970928,20.95376
+[069516]_straight_m8_long_straight_a_07984-08984ms.wav,48000,1.0,1.13,3000,sii_ansi,1,0.22907,0.22907,0.22907

@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 
 from .params import PARAM_NAMES
 
@@ -11,7 +12,7 @@ def compute_loss(
     """Per‑parameter MSE summed over all parameters.
 
     NaN positions (genuine reference failures) are masked out.
-    Predictions are assumed to already match target time dimensions.
+    Predictions are pooled to match each target's frame count when they differ.
     """
     device = next(model.parameters()).device
     losses = {}
@@ -19,6 +20,11 @@ def compute_loss(
 
     for name in PARAM_NAMES:
         prediction, target = preds[name], targets[name]
+
+        if prediction.shape[-1] != target.shape[-1]:
+            prediction = F.adaptive_avg_pool1d(
+                prediction.unsqueeze(1), target.shape[-1]
+            ).squeeze(1)
 
         mask = ~torch.isnan(target)
         if not mask.any():

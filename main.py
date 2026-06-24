@@ -27,32 +27,39 @@ def main():
     #     output_folder=labels_dir
     # )
 
-    dataset = PsychoAcousticDataset(sound_dir, labels_csv_path, subset_indices=[42])
+    dataset = PsychoAcousticDataset(
+        sound_dir,
+        labels_csv_path,
+        subset_indices=list(range(1000)),
+        # subset_indices=[69515, 75514, 67618],
+        audio_workers=12
+    )
 
-    # train_model(
-    #     sound_dir=sound_dir,
-    #     labels_csv_path=labels_csv_path,
-    #     checkpoint_dir=checkpoint_dir,
-    #     losses_dir=losses_dir,
-    #     epochs=2000,
-    #     lr=1e-3,
-    #     batch_size=1,
-    #     device_id=0,
-    #     num_workers=0,
-    #     #subset_indices=[42],
-    #     dataset=dataset,
-    # )
-
-    run_comparison(
+    train_model(
         sound_dir=sound_dir,
         labels_csv_path=labels_csv_path,
         checkpoint_dir=checkpoint_dir,
-        n_samples=1,
+        losses_dir=losses_dir,
+        epochs=40,
+        lr=1e-3,
+        batch_size=128,
         device_id=0,
-        #subset_indices=[42],
-        epochs=[0, 1000, "newest"],
+        num_workers=12,
         dataset=dataset,
     )
+
+    # subset_indices = [0]
+    # # subset_indices = [42]
+    # run_comparison(
+    #     sound_dir=sound_dir,
+    #     labels_csv_path=labels_csv_path,
+    #     checkpoint_dir=checkpoint_dir,
+    #     n_samples=1,
+    #     device_id=0,
+    #     subset_indices=subset_indices,
+    #     epochs=[0, 10, "newest"],
+    #     dataset=dataset,
+    # )
 
 
 

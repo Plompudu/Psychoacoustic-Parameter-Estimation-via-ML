@@ -12,20 +12,21 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
 from .DL_model import PsychoacousticModel
-from .params import PARAM_NAMES, FRAME_COUNTS
+from .params import PARAM_NAMES
 from .compute_loss import compute_loss
 from visualize_training.visualize_training import hold_plot, plot_losses
 
-def _load_time_biases(csv_path: str | Path, param_frame_counts: dict[str, int]) -> dict[str, torch.Tensor]:
+def _load_time_biases(csv_path: str | Path) -> dict[str, torch.Tensor]:
     df = pd.read_csv(csv_path)
+    counts = [500, 500, 9, 2, 1]
     biases: dict[str, torch.Tensor] = {}
-    for name in PARAM_NAMES:
+    for i, name in enumerate(PARAM_NAMES):
         vals = df[name].dropna().values.astype(np.float32)
-        bias = torch.from_numpy(vals).float()
-        T = param_frame_counts[name]
-        if bias.numel() != T:
-            bias = F.interpolate(bias.view(1, 1, -1), size=T, mode="linear", align_corners=False).view(-1)
-        biases[name] = bias
+        b = torch.from_numpy(vals).float()
+        T = counts[i]
+        if b.numel() != T:
+            b = F.interpolate(b.view(1, 1, -1), size=T, mode="linear", align_corners=False).view(-1)
+        biases[name] = b
     return biases
 
 
@@ -60,49 +61,42 @@ def _get_device(device_id: int = 0) -> torch.device:
 
 
 class PsychoAcousticDataset(Dataset):
-    def __init__(self, sound_dir: Path, csv_path: Path, subset_indices: list[int] | None = None):
+    def __init__(self, sound_dir: Path, csv_path: Path, subset_indices: list[int] | None = None,
+                 audio_workers: int = 0):
         self.sound_dir = Path(sound_dir)
         self.csv_path = Path(csv_path)
-        self._audio_cache: dict[str, torch.Tensor] = {}
 
         labels_cache = self.csv_path.with_suffix(".labels.pt")
         if labels_cache.exists():
             print(f"Loading pre-parsed labels from {labels_cache}...")
+            t0 = time.perf_counter()
             cached = torch.load(labels_cache, weights_only=True)
             all_stems = cached["stems"]
             all_labels = cached["labels"]
+            print(f"  done in {time.perf_counter() - t0:.4f} s")
         else:
             print(f"Parsing {self.csv_path} into memory...")
-            all_labels: dict[str, dict[str, torch.Tensor]] = {}
-            current_stem: str | None = None
-            current_values: dict[str, list[float]] = {n: [] for n in PARAM_NAMES}
             n = 0
             t0 = time.perf_counter()
-            with open(self.csv_path, newline="") as f:
-                f.readline()
-                for line in f:
-                    cols = line.rstrip("\r\n").split(",")
-                    stem = cols[0].replace(".csv", "")
-                    if stem != current_stem and current_stem is not None:
-                        all_labels[current_stem] = {
-                            name: torch.tensor(vals, dtype=torch.float32)
-                            for name, vals in current_values.items()
-                        }
-                        current_values = {n: [] for n in PARAM_NAMES}
-                    current_stem = stem
-                    for i, name in enumerate(PARAM_NAMES):
-                        v = cols[i + 2]
-                        current_values[name].append(float(v) if v else float("nan"))
-                    n += 1
-                    if n % 1_000_000 == 0:
-                        print(f"  parsed {n // 1_000_000}M rows ({time.perf_counter() - t0:.0f}s)...")
-            if current_stem is not None:
-                all_labels[current_stem] = {
-                    name: torch.tensor(vals, dtype=torch.float32)
-                    for name, vals in current_values.items()
-                }
+            all_labels: dict[str, dict[str, torch.Tensor]] = {}
+            usecols = ["source_file"] + PARAM_NAMES
+            reader = pd.read_csv(self.csv_path, usecols=usecols, chunksize=100_000)
+            for chunk in reader:
+                chunk["stem"] = chunk["source_file"].str.replace(".csv", "", regex=False)
+                for stem, grp in chunk.groupby("stem"):
+                    if stem not in all_labels:
+                        all_labels[stem] = {}
+                    for name in PARAM_NAMES:
+                        vals = grp[name].to_numpy(dtype=np.float32)
+                        all_labels[stem].setdefault(name, []).append(torch.from_numpy(vals))
+                n += len(chunk)
+                print(f"  parsed {n / 1_000_000:.1f}M rows ({time.perf_counter() - t0:.2f}s)...")
             all_stems = sorted(all_labels.keys())
-            print(f"Parsed {len(all_stems)} items — saving cache to {labels_cache}")
+            for stem in all_stems:
+                for name in PARAM_NAMES:
+                    all_labels[stem][name] = torch.cat(all_labels[stem][name])
+            elapsed = time.perf_counter() - t0
+            print(f"  done in {elapsed:.4f} s — saving cache to {labels_cache}")
             torch.save({"stems": all_stems, "labels": all_labels}, labels_cache)
 
         if subset_indices is not None:
@@ -112,32 +106,52 @@ class PsychoAcousticDataset(Dataset):
             self.stems = all_stems
             self._labels = all_labels
 
-    def __getstate__(self):
-        state = self.__dict__.copy()
-        state.pop("_audio_cache", None)
-        return state
+        audio_cache = self.csv_path.with_suffix(".audio.pt")
+        if audio_cache.exists():
+            print(f"Loading pre-parsed audio from {audio_cache}...")
+            t0 = time.perf_counter()
+            self._waveforms = torch.load(audio_cache, weights_only=True)
+            print(f"  done in {time.perf_counter() - t0:.4f} s")
+        else:
+            print(f"Loading {len(self.stems)} audio files into memory...")
+            self._waveforms: dict[str, torch.Tensor] = {}
+            t0 = time.perf_counter()
+            total = len(self.stems)
 
-    def __setstate__(self, state):
-        self.__dict__.update(state)
-        self._audio_cache = {}
+            def _load_one(stem: str) -> tuple[str, torch.Tensor]:
+                wav_path = self.sound_dir / f"{stem}.wav"
+                audio, _ = sf.read(str(wav_path))
+                if audio.ndim > 1:
+                    audio = audio.mean(axis=1)
+                return stem, torch.from_numpy(audio).float().unsqueeze(0)
+
+            if audio_workers > 1:
+                import concurrent.futures
+                n_workers = min(audio_workers, total)
+                with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as pool:
+                    futures = {pool.submit(_load_one, stem): stem for stem in self.stems}
+                    for i, f in enumerate(concurrent.futures.as_completed(futures), 1):
+                        stem, waveform = f.result()
+                        self._waveforms[stem] = waveform
+                        if i % 100 == 0 or i == total:
+                            print(f"  {i}/{total} done ({time.perf_counter() - t0:.4f}s)")
+            else:
+                for i, stem in enumerate(self.stems):
+                    stem, waveform = _load_one(stem)
+                    self._waveforms[stem] = waveform
+                    if (i + 1) % 100 == 0 or i + 1 == total:
+                        print(f"  {i + 1}/{total} done ({time.perf_counter() - t0:.4f}s)")
+            load_time = time.perf_counter() - t0
+            print(f"  done in {load_time:.4f} s")
+            if not subset_indices:
+                torch.save(self._waveforms, audio_cache)
 
     def __len__(self) -> int:
         return len(self.stems)
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         stem = self.stems[idx]
-
-        if stem in self._audio_cache:
-            waveform = self._audio_cache[stem]
-        else:
-            wav_path = self.sound_dir / f"{stem}.wav"
-            audio, _ = sf.read(str(wav_path))
-            if audio.ndim > 1:
-                audio = audio.mean(axis=1)
-            waveform = torch.from_numpy(audio).float().unsqueeze(0)
-            self._audio_cache[stem] = waveform
-
-        return waveform, self._labels[stem]
+        return self._waveforms[stem], self._labels[stem]
 
 
 
@@ -215,12 +229,17 @@ def _resume_checkpoint(
         return 0, []
 
 
-def _save_runtime_csv(output_dir: Path, stem: str, meta: dict, preds: dict[str, torch.Tensor], epoch_tag: str = ""):
+def _save_runtime_csv(output_dir: Path, stem: str, meta: dict, preds: dict[str, torch.Tensor], epoch_tag: str = "", targets: dict[str, torch.Tensor] | None = None):
     """Save per-parameter prediction statistics to CSV."""
     prefix = f"{epoch_tag}_" if epoch_tag else ""
     rows = []
     for name in PARAM_NAMES:
         p = preds[name][0]
+        if targets is not None:
+            t = targets[name][:p.shape[-1]]
+            mask = ~torch.isnan(t)
+            if mask.any():
+                p = p[mask]
         row = dict(meta)
         row["parameter"] = name
         row["output_frames"] = p.shape[-1]
@@ -241,6 +260,7 @@ def _save_prediction_plots(output_dir: Path, stem: str, preds: dict[str, torch.T
 
         p_np, t_np = p.cpu().numpy(), t.numpy()
         n_frames = len(p_np)
+        p_masked = np.ma.masked_where(np.isnan(t_np), p_np)
 
         fig, ax = plt.subplots(figsize=(10, 4))
         if n_frames == 1:
@@ -248,7 +268,7 @@ def _save_prediction_plots(output_dir: Path, stem: str, preds: dict[str, torch.T
             ax.axhline(y=p_np[0], label="prediction", color="tab:red", alpha=0.8, linestyle="--")
         else:
             ax.plot(t_np, label="target", color="tab:blue", alpha=0.8)
-            ax.plot(p_np, label="prediction", color="tab:red", alpha=0.8)
+            ax.plot(p_masked, label="prediction", color="tab:red", alpha=0.8)
         ax.set_xlabel("Time frame")
         ax.set_ylabel(name)
         ax.legend()
@@ -264,8 +284,10 @@ def _save_comparison_csv(output_dir: Path, stem: str, preds: dict[str, torch.Ten
     for name in PARAM_NAMES:
         p = preds[name][0]
         t = target[name][:p.shape[-1]]
+        p_np = p.cpu().numpy().copy()
+        p_np[np.isnan(t.numpy())] = np.nan
         all_arrays[f"{name}_target"] = t.numpy()
-        all_arrays[f"{name}_pred"] = p.cpu().numpy()
+        all_arrays[f"{name}_pred"] = p_np
     max_len = max(arr.shape[-1] for arr in all_arrays.values())
     df_dict: dict[str, np.ndarray] = {"time_index": np.arange(max_len)}
     for key, arr in all_arrays.items():
@@ -291,8 +313,8 @@ def _compare_epoch(
 
     stats_path = Path(__file__).parent.parent / "data" / "standardized_audio_files" / "training_set" / "visualization" / "parameter_average_per_time_segment.csv"
 
-    biases = _load_time_biases(stats_path, FRAME_COUNTS)
-    model = PsychoacousticModel(param_frame_counts=FRAME_COUNTS, initial_temporal_biases=biases).to(device)
+    biases = _load_time_biases(stats_path)
+    model = PsychoacousticModel(initial_temporal_biases=biases).to(device)
     if epoch == "newest":
         ckpt_files = sorted(Path(checkpoint_dir).glob("epoch_*.pt"))
         if not ckpt_files:
@@ -312,12 +334,8 @@ def _compare_epoch(
         epoch_tag = ckpt_path.stem
     print(f"Loaded {ckpt_path.name} for comparison")
 
-    indices = list(range(len(dataset)))
-    random.shuffle(indices)
-    indices = indices[:n_samples]
-
     with torch.no_grad():
-        for idx in indices:
+        for idx in range(len(dataset)):
             waveform, target = dataset[idx]
             inp = waveform.unsqueeze(0).to(device)
             t0 = time.perf_counter()
@@ -332,10 +350,30 @@ def _compare_epoch(
                 "inference_time_ms": round(elapsed * 1000, 2),
                 "backbone_frames": model.backbone(inp).shape[-1],
             }
-            _save_runtime_csv(output_dir, stem, meta, preds, epoch_tag)
+            _save_runtime_csv(output_dir, stem, meta, preds, epoch_tag, targets=target)
             _save_prediction_plots(output_dir, stem, preds, target, epoch_tag)
             _save_comparison_csv(output_dir, stem, preds, target, epoch_tag)
     print(f"Comparison saved to {output_dir}")
+
+
+class _DatasetView(Dataset):
+    """Lightweight view over a subset of a PsychoAcousticDataset, sharing the underlying data."""
+    def __init__(self, dataset: PsychoAcousticDataset, indices: list[int]):
+        n = len(dataset)
+        for i in indices:
+            if not 0 <= i < n:
+                raise IndexError(
+                    f"subset index {i} is out of range for dataset of size {n}"
+                )
+        self._dataset = dataset
+        self._indices = indices
+        self.stems = [dataset.stems[i] for i in indices]
+
+    def __len__(self) -> int:
+        return len(self._indices)
+
+    def __getitem__(self, idx: int):
+        return self._dataset[self._indices[idx]]
 
 
 def run_comparison(
@@ -347,6 +385,7 @@ def run_comparison(
     subset_indices: list[int] | None = None,
     epochs: list[int | str] | None = None,
     dataset: PsychoAcousticDataset | None = None,
+    audio_workers: int = 0,
 ):
     """Run inference on specified epochs and save plots/CSVs.
 
@@ -360,8 +399,14 @@ def run_comparison(
         epochs = [0, "newest"]
     print("=" * 100)
     device = _get_device(device_id)
-    if dataset is None:
-        dataset = PsychoAcousticDataset(sound_dir, labels_csv_path, subset_indices=subset_indices)
+    if subset_indices is not None:
+        if dataset is not None:
+            dataset = _DatasetView(dataset, subset_indices)
+        else:
+            dataset = PsychoAcousticDataset(sound_dir, labels_csv_path, subset_indices=subset_indices,
+                                            audio_workers=audio_workers)
+    elif dataset is None:
+        dataset = PsychoAcousticDataset(sound_dir, labels_csv_path, audio_workers=audio_workers)
     output_dir = Path(__file__).resolve().parent / "comparison"
     if output_dir.exists():
         shutil.rmtree(output_dir)
@@ -410,6 +455,7 @@ def train_model(
     num_workers: int = 0,
     subset_indices: list[int] | None = None,
     dataset: PsychoAcousticDataset | None = None,
+    audio_workers: int = 0,
 ) -> list[dict[str, float]]:
     print("=" * 100)
     device = _get_device(device_id)
@@ -423,8 +469,8 @@ def train_model(
 
     # ── Model ──
     stats_path = Path(__file__).parent.parent / "data" / "standardized_audio_files" / "training_set" / "visualization" / "parameter_average_per_time_segment.csv"
-    biases = _load_time_biases(stats_path, FRAME_COUNTS)
-    model = PsychoacousticModel(param_frame_counts=FRAME_COUNTS, initial_temporal_biases=biases).to(device)
+    biases = _load_time_biases(stats_path)
+    model = PsychoacousticModel(initial_temporal_biases=biases).to(device)
     optimizer = torch.optim.SGD(model.parameters(), lr=lr)
 
     # ── Resume from latest checkpoint ──
@@ -449,7 +495,8 @@ def train_model(
 
     # ── Dataset ──
     if dataset is None:
-        dataset = PsychoAcousticDataset(sound_dir, labels_csv_path, subset_indices=subset_indices)
+        dataset = PsychoAcousticDataset(sound_dir, labels_csv_path, subset_indices=subset_indices,
+                                        audio_workers=audio_workers)
     if len(dataset) == 0:
         print("No data found — nothing to train on.")
         return []
@@ -463,25 +510,29 @@ def train_model(
         num_workers=num_workers,
     )
 
+    t_train_start = time.perf_counter()
+    n_batches = len(loader)
+    print(f"Training {epochs - start_epoch} epoch(s) ({n_batches} batches each)...")
+
     # ── Training loop ──
     for epoch in range(start_epoch, epochs):
         t_epoch = time.perf_counter()
-        t_train = 0.0
+        t_batch_start = time.perf_counter()
         epoch_losses: list[dict[str, float]] = []
-        for waveform, targets in loader:
-            t_before = time.perf_counter()
+        for batch_idx, (waveform, targets) in enumerate(loader):
             losses = _training_step(model, waveform, targets, optimizer, device)
-            t_train += time.perf_counter() - t_before
             epoch_losses.append(losses)
+            if (batch_idx + 1) % 100 == 0:
+                print(f"  batch {batch_idx + 1}/{n_batches} ({time.perf_counter() - t_batch_start:.4f}s)")
+                t_batch_start = time.perf_counter()
         t_total = time.perf_counter() - t_epoch
-        t_data = t_total - t_train
 
         avg_losses = {
             k: torch.tensor([b[k] for b in epoch_losses]).mean().item()
             for k in epoch_losses[0]
         }
         history.append(avg_losses)
-        print(f"Epoch {epoch + 1}/{epochs} — loss: {avg_losses['total']:.4f} — {t_total:.1f}s (data: {t_data:.1f}s, train: {t_train:.1f}s)")
+        print(f"Epoch {epoch + 1}/{epochs} — loss: {avg_losses['total']:.6f} — {t_total:.4f}s")
 
         _log_epoch(epoch, avg_losses, model, optimizer, history, csv_path, plot_path, checkpoint_dir)
 

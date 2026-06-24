@@ -40,5 +40,7 @@ def plot_losses(csv_path: Path, plot_path: Path | None = None):
 
 
 def hold_plot():
+    if not plt.get_fignums():
+        return
     plt.ioff()
     plt.show(block=True)
