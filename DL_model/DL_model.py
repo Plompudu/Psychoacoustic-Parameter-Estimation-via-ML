@@ -13,21 +13,38 @@ class PsychoacousticModel(nn.Module):
     ):
         super().__init__()
         self.backbone = nn.Sequential(
-            nn.Conv1d(1, 24, kernel_size=7, stride=2, padding=3),
+            # Stage 1
+            nn.Conv1d(1, 10, kernel_size=7, stride=2, padding=3),
+            nn.BatchNorm1d(10),
             nn.ReLU(),
-            nn.Conv1d(24, 48, kernel_size=5, stride=2, padding=2),
+            nn.MaxPool1d(kernel_size=2, stride=2),
+            # Stage 2
+            nn.Conv1d(10, 20, kernel_size=5, stride=1, padding=2),
+            nn.BatchNorm1d(20),
             nn.ReLU(),
-            nn.Conv1d(48, 64, kernel_size=3, stride=2, padding=1),
+            nn.MaxPool1d(kernel_size=2, stride=2),
+            # Stage 3
+            nn.Conv1d(20, 40, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm1d(40),
             nn.ReLU(),
+            nn.MaxPool1d(kernel_size=2, stride=2),
+            # Stage 4
+            nn.Conv1d(40, 60, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm1d(60),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=2, stride=2),
+            # Stage 5
+            nn.Conv1d(60, 80, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm1d(80),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=2, stride=2),
         )
 
         self.heads = nn.ModuleDict()
         for name in PARAM_NAMES:
             T = param_frame_counts[name]
             self.heads[name] = nn.Sequential(
-                nn.Conv1d(64, 16, kernel_size=1),
-                nn.ReLU(),
-                nn.Conv1d(16, 1, kernel_size=1),
+                nn.Conv1d(80, 1, kernel_size=1),
                 nn.AdaptiveAvgPool1d(T),
             )
 

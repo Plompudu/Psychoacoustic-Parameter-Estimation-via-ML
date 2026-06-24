@@ -215,8 +215,9 @@ def _resume_checkpoint(
         return 0, []
 
 
-def _save_runtime_csv(output_dir: Path, stem: str, meta: dict, preds: dict[str, torch.Tensor]):
+def _save_runtime_csv(output_dir: Path, stem: str, meta: dict, preds: dict[str, torch.Tensor], epoch_tag: str = ""):
     """Save per-parameter prediction statistics to CSV."""
+    prefix = f"{epoch_tag}_" if epoch_tag else ""
     rows = []
     for name in PARAM_NAMES:
         p = preds[name][0]
@@ -228,11 +229,12 @@ def _save_runtime_csv(output_dir: Path, stem: str, meta: dict, preds: dict[str, 
         row["pred_mean"] = round(p.mean().item(), 6)
         rows.append(row)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    pd.DataFrame(rows).to_csv(output_dir / f"{ts}_{stem}_runtime.csv", index=False)
+    pd.DataFrame(rows).to_csv(output_dir / f"{prefix}{ts}_{stem}_runtime.csv", index=False)
 
 
-def _save_prediction_plots(output_dir: Path, stem: str, preds: dict[str, torch.Tensor], target: dict[str, torch.Tensor]):
+def _save_prediction_plots(output_dir: Path, stem: str, preds: dict[str, torch.Tensor], target: dict[str, torch.Tensor], epoch_tag: str = ""):
     """Plot prediction vs target for each parameter and save as PNG."""
+    prefix = f"{epoch_tag}_" if epoch_tag else ""
     for name in PARAM_NAMES:
         p = preds[name][0]
         t = target[name][:p.shape[-1]]
@@ -251,12 +253,13 @@ def _save_prediction_plots(output_dir: Path, stem: str, preds: dict[str, torch.T
         ax.set_ylabel(name)
         ax.legend()
         fig.tight_layout()
-        fig.savefig(output_dir / f"{stem}_{name}.png")
+        fig.savefig(output_dir / f"{prefix}{stem}_{name}.png")
         plt.close(fig)
 
 
-def _save_comparison_csv(output_dir: Path, stem: str, preds: dict[str, torch.Tensor], target: dict[str, torch.Tensor]):
+def _save_comparison_csv(output_dir: Path, stem: str, preds: dict[str, torch.Tensor], target: dict[str, torch.Tensor], epoch_tag: str = ""):
     """Save side-by-side target vs prediction values for all params as CSV."""
+    prefix = f"{epoch_tag}_" if epoch_tag else ""
     all_arrays: dict[str, np.ndarray] = {}
     for name in PARAM_NAMES:
         p = preds[name][0]
@@ -268,7 +271,7 @@ def _save_comparison_csv(output_dir: Path, stem: str, preds: dict[str, torch.Ten
     for key, arr in all_arrays.items():
         pad = max_len - arr.shape[-1]
         df_dict[key] = np.pad(arr, (0, pad), constant_values=np.nan)
-    pd.DataFrame(df_dict).to_csv(output_dir / f"{stem}_comparison.csv", index=False)
+    pd.DataFrame(df_dict).to_csv(output_dir / f"{prefix}{stem}_comparison.csv", index=False)
 
 
 def _compare_epoch(
@@ -278,13 +281,12 @@ def _compare_epoch(
     n_samples: int = 1,
     device: torch.device | None = None,
     epoch: int | str = "newest",
+    epoch_tag: str = "",
 ):
     """Run inference with a specific epoch checkpoint and save plots + CSVs."""
     if device is None:
         device = _get_device()
     output_dir = Path(output_dir)
-    if output_dir.exists():
-        shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     stats_path = Path(__file__).parent.parent / "data" / "standardized_audio_files" / "training_set" / "visualization" / "parameter_average_per_time_segment.csv"
@@ -328,9 +330,9 @@ def _compare_epoch(
                 "inference_time_ms": round(elapsed * 1000, 2),
                 "backbone_frames": model.backbone(inp).shape[-1],
             }
-            _save_runtime_csv(output_dir, stem, meta, preds)
-            _save_prediction_plots(output_dir, stem, preds, target)
-            _save_comparison_csv(output_dir, stem, preds, target)
+            _save_runtime_csv(output_dir, stem, meta, preds, epoch_tag)
+            _save_prediction_plots(output_dir, stem, preds, target, epoch_tag)
+            _save_comparison_csv(output_dir, stem, preds, target, epoch_tag)
     print(f"Comparison saved to {output_dir}")
 
 
@@ -342,6 +344,7 @@ def run_comparison(
     device_id: int = 0,
     subset_indices: list[int] | None = None,
     epochs: list[int | str] | None = None,
+    dataset: PsychoAcousticDataset | None = None,
 ):
     """Run inference on specified epochs and save plots/CSVs.
 
@@ -355,11 +358,14 @@ def run_comparison(
         epochs = [0, "newest"]
     print("=" * 100)
     device = _get_device(device_id)
-    dataset = PsychoAcousticDataset(sound_dir, labels_csv_path, subset_indices=subset_indices)
+    if dataset is None:
+        dataset = PsychoAcousticDataset(sound_dir, labels_csv_path, subset_indices=subset_indices)
+    output_dir = Path(__file__).resolve().parent / "comparison"
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
     for ep in epochs:
         tag = f"epoch_{ep:04d}" if isinstance(ep, int) else ep
-        output_dir = Path(__file__).resolve().parent / f"comparison_{tag}"
-        _compare_epoch(dataset, checkpoint_dir, output_dir, n_samples, device=device, epoch=ep)
+        _compare_epoch(dataset, checkpoint_dir, output_dir, n_samples, device=device, epoch=ep, epoch_tag=tag)
     hold_plot()
 
 
@@ -401,6 +407,7 @@ def train_model(
     device_id: int = 0,
     num_workers: int = 0,
     subset_indices: list[int] | None = None,
+    dataset: PsychoAcousticDataset | None = None,
 ) -> list[dict[str, float]]:
     print("=" * 100)
     device = _get_device(device_id)
@@ -439,7 +446,8 @@ def train_model(
         pd.DataFrame(rows).to_csv(csv_path, index=False)
 
     # ── Dataset ──
-    dataset = PsychoAcousticDataset(sound_dir, labels_csv_path, subset_indices=subset_indices)
+    if dataset is None:
+        dataset = PsychoAcousticDataset(sound_dir, labels_csv_path, subset_indices=subset_indices)
     if len(dataset) == 0:
         print("No data found — nothing to train on.")
         return []

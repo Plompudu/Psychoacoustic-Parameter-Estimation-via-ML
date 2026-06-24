@@ -3,6 +3,7 @@ from pathlib import Path
 from data_preprocessing.calculate_reference_values import calculate_reference_values
 from data_preprocessing.convert_to_wav import convert_to_wav
 from DL_model.train_model import train_model, run_comparison
+from DL_model.train_model import PsychoAcousticDataset
 
 
 def main():
@@ -26,18 +27,21 @@ def main():
     #     output_folder=labels_dir
     # )
 
-    train_model(
-        sound_dir=sound_dir,
-        labels_csv_path=labels_csv_path,
-        checkpoint_dir=checkpoint_dir,
-        losses_dir=losses_dir,
-        epochs=100,
-        lr=1e-3,
-        batch_size=1,
-        device_id=0,
-        num_workers=0,
-        subset_indices=[42],
-    )
+    dataset = PsychoAcousticDataset(sound_dir, labels_csv_path, subset_indices=[70000])
+
+    # train_model(
+    #     sound_dir=sound_dir,
+    #     labels_csv_path=labels_csv_path,
+    #     checkpoint_dir=checkpoint_dir,
+    #     losses_dir=losses_dir,
+    #     epochs=2000,
+    #     lr=1e-3,
+    #     batch_size=1,
+    #     device_id=0,
+    #     num_workers=0,
+    #     #subset_indices=[42],
+    #     dataset=dataset,
+    # )
 
     run_comparison(
         sound_dir=sound_dir,
@@ -45,8 +49,9 @@ def main():
         checkpoint_dir=checkpoint_dir,
         n_samples=1,
         device_id=0,
-        subset_indices=[42],
-        epochs=[0, "newest"],
+        #subset_indices=[42],
+        epochs=[0, 1000, "newest"],
+        dataset=dataset,
     )
 
 
