@@ -308,6 +308,8 @@ def _compare_epoch(
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
+    if not epoch_tag or epoch_tag == "newest":
+        epoch_tag = ckpt_path.stem
     print(f"Loaded {ckpt_path.name} for comparison")
 
     indices = list(range(len(dataset)))
@@ -364,7 +366,7 @@ def run_comparison(
     if output_dir.exists():
         shutil.rmtree(output_dir)
     for ep in epochs:
-        tag = f"epoch_{ep:04d}" if isinstance(ep, int) else ep
+        tag = f"epoch_{ep:04d}" if isinstance(ep, int) else ""
         _compare_epoch(dataset, checkpoint_dir, output_dir, n_samples, device=device, epoch=ep, epoch_tag=tag)
     hold_plot()
 

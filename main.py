@@ -27,7 +27,7 @@ def main():
     #     output_folder=labels_dir
     # )
 
-    dataset = PsychoAcousticDataset(sound_dir, labels_csv_path, subset_indices=[70000])
+    dataset = PsychoAcousticDataset(sound_dir, labels_csv_path, subset_indices=[42])
 
     # train_model(
     #     sound_dir=sound_dir,
