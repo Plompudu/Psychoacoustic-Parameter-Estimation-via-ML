@@ -95,7 +95,7 @@ def calculate_reference_values(input_folder: Path, output_folder: Path):
 
     audio_path_strs = [str(p) for p in sorted(input_folder.glob("*.wav"))]
 
-    with ProcessPoolExecutor(max_workers=10) as executor:
+    with ProcessPoolExecutor(max_workers=12) as executor:
         fut_to_info = {}
         submitted_count = {}
         for p_str in audio_path_strs:

@@ -1,4 +1,5 @@
 import random
+import shutil
 from datetime import datetime
 from pathlib import Path
 import time
@@ -7,11 +8,25 @@ import numpy as np
 import pandas as pd
 import soundfile as sf
 import torch
+import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader
 
 from .DL_model import PsychoacousticModel
-from .params import PARAM_NAMES
+from .params import PARAM_NAMES, FRAME_COUNTS
 from .compute_loss import compute_loss
 from visualize_training.visualize_training import hold_plot, plot_losses
+
+def _load_time_biases(csv_path: str | Path, param_frame_counts: dict[str, int]) -> dict[str, torch.Tensor]:
+    df = pd.read_csv(csv_path)
+    biases: dict[str, torch.Tensor] = {}
+    for name in PARAM_NAMES:
+        vals = df[name].dropna().values.astype(np.float32)
+        bias = torch.from_numpy(vals).float()
+        T = param_frame_counts[name]
+        if bias.numel() != T:
+            bias = F.interpolate(bias.view(1, 1, -1), size=T, mode="linear", align_corners=False).view(-1)
+        biases[name] = bias
+    return biases
 
 
 def _get_device(device_id: int = 0) -> torch.device:
@@ -44,47 +59,92 @@ def _get_device(device_id: int = 0) -> torch.device:
         return torch.device("cpu")
 
 
-def _load_audio_label_pairs(
-    sound_dir: Path, labels_dir: Path
-) -> list[tuple[torch.Tensor, dict[str, torch.Tensor]]]:
-    """
-    Load audio-label pairs from the given directories.
+class PsychoAcousticDataset(Dataset):
+    def __init__(self, sound_dir: Path, csv_path: Path, subset_indices: list[int] | None = None):
+        self.sound_dir = Path(sound_dir)
+        self.csv_path = Path(csv_path)
+        self._audio_cache: dict[str, torch.Tensor] = {}
 
-    Args:
-        sound_dir (Path): The directory containing audio files.
-        labels_dir (Path): The directory containing label CSV files.
+        labels_cache = self.csv_path.with_suffix(".labels.pt")
+        if labels_cache.exists():
+            print(f"Loading pre-parsed labels from {labels_cache}...")
+            cached = torch.load(labels_cache, weights_only=True)
+            all_stems = cached["stems"]
+            all_labels = cached["labels"]
+        else:
+            print(f"Parsing {self.csv_path} into memory...")
+            all_labels: dict[str, dict[str, torch.Tensor]] = {}
+            current_stem: str | None = None
+            current_values: dict[str, list[float]] = {n: [] for n in PARAM_NAMES}
+            n = 0
+            t0 = time.perf_counter()
+            with open(self.csv_path, newline="") as f:
+                f.readline()
+                for line in f:
+                    cols = line.rstrip("\r\n").split(",")
+                    stem = cols[0].replace(".csv", "")
+                    if stem != current_stem and current_stem is not None:
+                        all_labels[current_stem] = {
+                            name: torch.tensor(vals, dtype=torch.float32)
+                            for name, vals in current_values.items()
+                        }
+                        current_values = {n: [] for n in PARAM_NAMES}
+                    current_stem = stem
+                    for i, name in enumerate(PARAM_NAMES):
+                        v = cols[i + 2]
+                        current_values[name].append(float(v) if v else float("nan"))
+                    n += 1
+                    if n % 1_000_000 == 0:
+                        print(f"  parsed {n // 1_000_000}M rows ({time.perf_counter() - t0:.0f}s)...")
+            if current_stem is not None:
+                all_labels[current_stem] = {
+                    name: torch.tensor(vals, dtype=torch.float32)
+                    for name, vals in current_values.items()
+                }
+            all_stems = sorted(all_labels.keys())
+            print(f"Parsed {len(all_stems)} items — saving cache to {labels_cache}")
+            torch.save({"stems": all_stems, "labels": all_labels}, labels_cache)
 
-    Returns:
-        list[tuple[torch.Tensor, dict[str, torch.Tensor]]]: A list of tuples, where each tuple contains a waveform
-            tensor and a dictionary of target tensors.
-    """
-    pairs: list[tuple[torch.Tensor, dict[str, torch.Tensor]]] = []
-    for csv_path in sorted(Path(labels_dir).glob("*.csv")):
-        stem = csv_path.stem
-        wav_path = Path(sound_dir) / f"{stem}.wav"
-        if not wav_path.exists():
-            print(f"  Skipping {stem} — no matching WAV")
-            continue
+        if subset_indices is not None:
+            self.stems = [all_stems[i] for i in subset_indices]
+            self._labels = {s: all_labels[s] for s in self.stems}
+        else:
+            self.stems = all_stems
+            self._labels = all_labels
 
-        audio, _ = sf.read(wav_path)
-        if audio.ndim > 1:
-            audio = audio.mean(axis=1)
-        waveform = torch.from_numpy(audio).float().unsqueeze(0)
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state.pop("_audio_cache", None)
+        return state
 
-        df = pd.read_csv(csv_path)
-        targets = {}
-        for name in PARAM_NAMES:
-            targets[name] = torch.from_numpy(df[name].values.astype(np.float32))
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self._audio_cache = {}
 
-        pairs.append((waveform, targets))
-    return pairs
+    def __len__(self) -> int:
+        return len(self.stems)
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        stem = self.stems[idx]
+
+        if stem in self._audio_cache:
+            waveform = self._audio_cache[stem]
+        else:
+            wav_path = self.sound_dir / f"{stem}.wav"
+            audio, _ = sf.read(str(wav_path))
+            if audio.ndim > 1:
+                audio = audio.mean(axis=1)
+            waveform = torch.from_numpy(audio).float().unsqueeze(0)
+            self._audio_cache[stem] = waveform
+
+        return waveform, self._labels[stem]
+
 
 
 def _collate(
-    pairs: list[tuple[torch.Tensor, dict[str, torch.Tensor]]],
-    device: torch.device
+    batch: list[tuple[torch.Tensor, dict[str, torch.Tensor]]]
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    waveforms = [p[0] for p in pairs]
+    waveforms = [b[0] for b in batch]
     max_wav_len = max(w.shape[-1] for w in waveforms)
     batch_waveforms = []
     for w in waveforms:
@@ -92,32 +152,25 @@ def _collate(
         if pad > 0:
             w = torch.nn.functional.pad(w, (0, pad))
         batch_waveforms.append(w)
-    waveform_batch = torch.stack(batch_waveforms, dim=0).to(device)
+    waveform_batch = torch.stack(batch_waveforms, dim=0)
 
     max_frames = {
-        name: max(p[1][name].shape[-1] for p in pairs)
+        name: max(b[1][name].shape[-1] for b in batch)
         for name in PARAM_NAMES
     }
     target_batch: dict[str, list[torch.Tensor]] = {n: [] for n in PARAM_NAMES}
-    for p in pairs:
+    for b in batch:
         for name in PARAM_NAMES:
-            t = p[1][name]
+            t = b[1][name]
             pad = max_frames[name] - t.shape[-1]
             if pad > 0:
                 t = torch.nn.functional.pad(t, (0, pad), value=float("nan"))
             target_batch[name].append(t)
     targets = {
-        name: torch.stack(target_batch[name], dim=0).to(device) for name in PARAM_NAMES
+        name: torch.stack(target_batch[name], dim=0) for name in PARAM_NAMES
     }
 
     return waveform_batch, targets
-
-
-def _valid_frame_count(t: torch.Tensor) -> int:
-    """Number of non-NaN frames from the start."""
-    valid = ~torch.isnan(t)
-    idxs = torch.where(valid.any(dim=0) if t.ndim == 2 else valid)[0]
-    return idxs[-1].item() + 1 if len(idxs) > 0 else 1
 
 
 def _training_step(
@@ -125,8 +178,11 @@ def _training_step(
     waveform: torch.Tensor,
     targets: dict[str, torch.Tensor],
     optimizer: torch.optim.Optimizer,
+    device: torch.device,
 ) -> dict[str, float]:
     """Single forward-backward-update step for one batch."""
+    waveform = waveform.to(device)
+    targets = {name: t.to(device) for name, t in targets.items()}
     preds = model(waveform)
     trimmed = {name: targets[name][:, :preds[name].shape[-1]]
                for name in PARAM_NAMES}
@@ -215,48 +271,55 @@ def _save_comparison_csv(output_dir: Path, stem: str, preds: dict[str, torch.Ten
     pd.DataFrame(df_dict).to_csv(output_dir / f"{stem}_comparison.csv", index=False)
 
 
-def _compare_predictions(
-    sound_dir: Path,
-    labels_dir: Path,
+def _compare_epoch(
+    dataset: PsychoAcousticDataset,
     checkpoint_dir: Path,
     output_dir: Path,
     n_samples: int = 1,
     device: torch.device | None = None,
+    epoch: int | str = "newest",
 ):
-    """Run inference on random samples and save plots + CSVs."""
+    """Run inference with a specific epoch checkpoint and save plots + CSVs."""
     if device is None:
         device = _get_device()
     output_dir = Path(output_dir)
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    pairs = _load_audio_label_pairs(sound_dir, labels_dir)
-    param_frame_counts = {
-        name: max(_valid_frame_count(p[1][name]) for p in pairs)
-        for name in PARAM_NAMES
-    }
-    model = PsychoacousticModel(param_frame_counts=param_frame_counts).to(device)
-    ckpt_files = sorted(Path(checkpoint_dir).glob("epoch_*.pt"))
-    if not ckpt_files:
-        print("No checkpoint found — skipping comparison")
-        return
-    latest = ckpt_files[-1]
-    ckpt = torch.load(latest, map_location="cpu", weights_only=False)
+    stats_path = Path(__file__).parent.parent / "data" / "standardized_audio_files" / "training_set" / "visualization" / "parameter_average_per_time_segment.csv"
+
+    biases = _load_time_biases(stats_path, FRAME_COUNTS)
+    model = PsychoacousticModel(param_frame_counts=FRAME_COUNTS, initial_temporal_biases=biases).to(device)
+    if epoch == "newest":
+        ckpt_files = sorted(Path(checkpoint_dir).glob("epoch_*.pt"))
+        if not ckpt_files:
+            print("No checkpoint found — skipping comparison")
+            return
+        ckpt_path = ckpt_files[-1]
+    else:
+        ckpt_path = Path(checkpoint_dir) / f"epoch_{epoch:04d}.pt"
+        if not ckpt_path.exists():
+            print(f"Checkpoint {ckpt_path.name} not found — skipping")
+            return
+
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
-    print(f"Loaded {latest.name} for comparison")
+    print(f"Loaded {ckpt_path.name} for comparison")
 
-    csv_paths = sorted(Path(labels_dir).glob("*.csv"))
-    zipped = list(zip(pairs, csv_paths))
-    random.shuffle(zipped)
-    zipped = zipped[:n_samples]
+    indices = list(range(len(dataset)))
+    random.shuffle(indices)
+    indices = indices[:n_samples]
 
     with torch.no_grad():
-        for (waveform, target), csv_path in zipped:
+        for idx in indices:
+            waveform, target = dataset[idx]
             inp = waveform.unsqueeze(0).to(device)
             t0 = time.perf_counter()
             preds = model(inp)
             elapsed = time.perf_counter() - t0
-            stem = csv_path.stem
+            stem = dataset.stems[idx]
 
             meta = {
                 "file": f"{stem}.wav",
@@ -273,16 +336,30 @@ def _compare_predictions(
 
 def run_comparison(
     sound_dir: Path,
-    labels_dir: Path,
+    labels_csv_path: Path,
     checkpoint_dir: Path,
     n_samples: int = 1,
     device_id: int = 0,
+    subset_indices: list[int] | None = None,
+    epochs: list[int | str] | None = None,
 ):
-    """Run inference on random samples and save plots/CSVs to comparison_newest_epoch/."""
+    """Run inference on specified epochs and save plots/CSVs.
+
+    Parameters
+    ----------
+    epochs : list[int | str] | None
+        Epoch numbers to compare. Use "newest" for the latest checkpoint.
+        Defaults to [0, "newest"].
+    """
+    if epochs is None:
+        epochs = [0, "newest"]
     print("=" * 100)
     device = _get_device(device_id)
-    output_dir = Path(__file__).resolve().parent / "comparison_newest_epoch"
-    _compare_predictions(sound_dir, labels_dir, checkpoint_dir, output_dir, n_samples, device=device)
+    dataset = PsychoAcousticDataset(sound_dir, labels_csv_path, subset_indices=subset_indices)
+    for ep in epochs:
+        tag = f"epoch_{ep:04d}" if isinstance(ep, int) else ep
+        output_dir = Path(__file__).resolve().parent / f"comparison_{tag}"
+        _compare_epoch(dataset, checkpoint_dir, output_dir, n_samples, device=device, epoch=ep)
     hold_plot()
 
 
@@ -315,13 +392,15 @@ def _log_epoch(
 
 def train_model(
     sound_dir: Path,
-    labels_dir: Path,
+    labels_csv_path: Path,
     checkpoint_dir: Path,
     losses_dir: Path,
     epochs: int = 2,
     lr: float = 1e-3,
     batch_size: int = 2,
     device_id: int = 0,
+    num_workers: int = 0,
+    subset_indices: list[int] | None = None,
 ) -> list[dict[str, float]]:
     print("=" * 100)
     device = _get_device(device_id)
@@ -333,50 +412,66 @@ def train_model(
     csv_path = losses_dir / "losses.csv"
     plot_path = losses_dir / "losses.png"
 
-    # ── Load dataset ──
-    pairs = _load_audio_label_pairs(sound_dir, labels_dir)
-    if not pairs:
-        print("No data found — nothing to train on.")
-        return []
-    print(f"Loaded {len(pairs)} audio-label pair(s)")
-
-    # ── Compute per-parameter frame counts from data ──
-    param_frame_counts = {
-        name: max(_valid_frame_count(p[1][name]) for p in pairs)
-        for name in PARAM_NAMES
-    }
-    model = PsychoacousticModel(param_frame_counts=param_frame_counts).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    # ── Model ──
+    stats_path = Path(__file__).parent.parent / "data" / "standardized_audio_files" / "training_set" / "visualization" / "parameter_average_per_time_segment.csv"
+    biases = _load_time_biases(stats_path, FRAME_COUNTS)
+    model = PsychoacousticModel(param_frame_counts=FRAME_COUNTS, initial_temporal_biases=biases).to(device)
+    optimizer = torch.optim.SGD(model.parameters(), lr=lr)
 
     # ── Resume from latest checkpoint ──
     start_epoch, history = _resume_checkpoint(model, optimizer, checkpoint_dir)
     if start_epoch == 0:
         csv_path.unlink(missing_ok=True)
         print("Starting from scratch")
+        ckpt_path = checkpoint_dir / "epoch_0000.pt"
+        torch.save(
+            {
+                "epoch": 0,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "history": [],
+            },
+            ckpt_path,
+        )
+        print(f"Saved initial parameters to {ckpt_path.name}")
     elif history:
         rows = [{"epoch": i + 1, **h} for i, h in enumerate(history)]
         pd.DataFrame(rows).to_csv(csv_path, index=False)
 
+    # ── Dataset ──
+    dataset = PsychoAcousticDataset(sound_dir, labels_csv_path, subset_indices=subset_indices)
+    if len(dataset) == 0:
+        print("No data found — nothing to train on.")
+        return []
+    print(f"Loaded {len(dataset)} audio-label pair(s)")
+
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        collate_fn=_collate,
+        num_workers=num_workers,
+    )
+
     # ── Training loop ──
-
     for epoch in range(start_epoch, epochs):
-        random.shuffle(pairs)
-
-        t0 = time.perf_counter()
+        t_epoch = time.perf_counter()
+        t_train = 0.0
         epoch_losses: list[dict[str, float]] = []
-        for i in range(0, len(pairs), batch_size):
-            batch_pairs = pairs[i : i + batch_size]
-            waveform, targets = _collate(batch_pairs, device)
-            losses = _training_step(model, waveform, targets, optimizer)
+        for waveform, targets in loader:
+            t_before = time.perf_counter()
+            losses = _training_step(model, waveform, targets, optimizer, device)
+            t_train += time.perf_counter() - t_before
             epoch_losses.append(losses)
-        elapsed = time.perf_counter() - t0
+        t_total = time.perf_counter() - t_epoch
+        t_data = t_total - t_train
 
         avg_losses = {
             k: torch.tensor([b[k] for b in epoch_losses]).mean().item()
             for k in epoch_losses[0]
         }
         history.append(avg_losses)
-        print(f"Epoch {epoch + 1}/{epochs} — loss: {avg_losses['total']:.4f} — {elapsed:.1f}s")
+        print(f"Epoch {epoch + 1}/{epochs} — loss: {avg_losses['total']:.4f} — {t_total:.1f}s (data: {t_data:.1f}s, train: {t_train:.1f}s)")
 
         _log_epoch(epoch, avg_losses, model, optimizer, history, csv_path, plot_path, checkpoint_dir)
 
