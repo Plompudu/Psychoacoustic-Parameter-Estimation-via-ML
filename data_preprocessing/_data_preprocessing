@@ -1,0 +1,13 @@
+1. split raw audio files into <=1s long segments per channel
+    data/raw_sound_files => data/raw_audio_files_1s
+2. split data into training, test and validation set (70:15:15, randomized selection)
+    data/raw_sound_files_1s => data/test , data/training , data/validation
+3. calculate reference values for psychoacoustic parameters
+    data/raw_sound_files => data/reference_values/partial_df_1/XXX.csv (loudness, sharpness, roughness, TNR)
+    data/raw_sound_files_1s => data/reference_values/partial_df_2/XXX.csv (SII)
+4. merge them into a single references.csv
+    # 1. append the partial_df2's on a per file basis together on a 2ms grid with the correct number of empty values and a correct time_index
+    # 2. fix df1's time_index by adding empty values and moving them on the correct places on the 2ms grid indicated by the time_index (0 = 0ms, 1 = 2ms, 2 = 4ms, ...)
+5. median 1s-chunk (with values moved direct one after another)
+    data/reference_values/references.csv => data/reference_values/median_1s_chunk.csv
+
