@@ -10,7 +10,7 @@ PARAM_NAMES = [
 FRAME_COUNTS: dict[str, int] = {
     "loudness_zwtv": 500,
     "sharpness_din_tv": 500,
-    "roughness_dw": 9,
+    "roughness_dw": 10,
     "tnr_ecma_perseg": 2,
     "sii_ansi": 1,
 }

@@ -39,7 +39,7 @@ class PsychoacousticModel(nn.Module):
             nn.MaxPool1d(kernel_size=2, stride=2),
         )
 
-        MAX = [500, 500, 9, 2, 1]
+        MAX = [500, 500, 10, 2, 1]
         self.heads = nn.ModuleDict()
         for i, name in enumerate(PARAM_NAMES):
             self.heads[name] = nn.Sequential(

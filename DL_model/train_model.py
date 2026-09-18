@@ -1,4 +1,3 @@
-import gc
 import random
 import shutil
 from datetime import datetime
@@ -13,13 +12,23 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
 from .DL_model import PsychoacousticModel
-from .params import PARAM_NAMES
+from .labels import (
+    build_labels_for_stems,
+    collect_segment_stems,
+    load_references_grouped,
+    segment_local_offsets,
+)
+from .params import FRAME_COUNTS, PARAM_NAMES
 from .compute_loss import compute_loss
 from visualize_training.visualize_training import hold_plot, plot_losses
 
+_BIAS_STATS_PATH = (
+    Path(__file__).parent.parent / "data" / "reference_values" / "median_1s_chunk.csv"
+)
+
 def _load_time_biases(csv_path: str | Path) -> dict[str, torch.Tensor]:
     df = pd.read_csv(csv_path)
-    counts = [500, 500, 9, 2, 1]
+    counts = [FRAME_COUNTS[name] for name in PARAM_NAMES]
     biases: dict[str, torch.Tensor] = {}
     for i, name in enumerate(PARAM_NAMES):
         vals = df[name].dropna().values.astype(np.float32)
@@ -61,64 +70,78 @@ def _get_device(device_id: int = 0) -> torch.device:
         return torch.device("cpu")
 
 
+def _get_device_name(device: torch.device) -> str:
+    """Return a human-readable name for the given device."""
+    if device.type == "cpu":
+        try:
+            import platform
+            return f"CPU ({platform.processor()})"
+        except Exception:
+            return "CPU"
+    if device.type == "cuda":
+        return f"CUDA: {torch.cuda.get_device_name(device)}"
+    try:
+        import torch_directml
+        idx = device.index if device.index is not None else 0
+        return torch_directml.device_name(idx).replace("\x00", "")
+    except Exception:
+        return str(device)
+
+
+def _enumerate_devices() -> list[tuple[torch.device, str]]:
+    """Return all available (device, name) pairs: DirectML GPUs first, then CPU."""
+    devices: list[tuple[torch.device, str]] = []
+    try:
+        import torch_directml
+        for i in range(torch_directml.device_count()):
+            dev = torch_directml.device(i)
+            devices.append((dev, torch_directml.device_name(i).replace("\x00", "")))
+    except ImportError:
+        pass
+    if torch.cuda.is_available():
+        for i in range(torch.cuda.device_count()):
+            dev = torch.device("cuda", i)
+            devices.append((dev, f"CUDA: {torch.cuda.get_device_name(i)}"))
+    devices.append((torch.device("cpu"), _get_device_name(torch.device("cpu"))))
+    return devices
+
+
 class PsychoAcousticDataset(Dataset):
-    def __init__(self, sound_dir: Path, csv_path: Path, subset_indices: list[int] | None = None,
+    def __init__(self, sound_dir: Path, references_path: Path, subset_indices: list[int] | None = None,
                  audio_workers: int = 0):
         self.sound_dir = Path(sound_dir)
-        self.csv_path = Path(csv_path)
+        self.references_path = Path(references_path)
 
-        labels_cache = self.csv_path.with_suffix(".labels.pt")
-        if labels_cache.exists():
-            print(f"Loading pre-parsed labels from {labels_cache}...")
-            t0 = time.perf_counter()
-            cached = torch.load(labels_cache, weights_only=True)
-            all_stems = cached["stems"]
-            all_labels = cached["labels"]
-            print(f"  done in {time.perf_counter() - t0:.4f} s")
-        else:
-            print(f"Parsing {self.csv_path} into memory...")
-            n = 0
-            t0 = time.perf_counter()
-            all_labels: dict[str, dict[str, torch.Tensor]] = {}
-            usecols = ["source_file"] + PARAM_NAMES
-            reader = pd.read_csv(self.csv_path, usecols=usecols, chunksize=100_000)
-            for chunk in reader:
-                chunk["stem"] = chunk["source_file"].str.replace(".csv", "", regex=False)
-                for stem, grp in chunk.groupby("stem"):
-                    if stem not in all_labels:
-                        all_labels[stem] = {}
-                    for name in PARAM_NAMES:
-                        vals = grp[name].to_numpy(dtype=np.float32)
-                        all_labels[stem].setdefault(name, []).append(torch.from_numpy(vals))
-                n += len(chunk)
-                print(f"  parsed {n / 1_000_000:.1f}M rows ({time.perf_counter() - t0:.2f}s)...")
-            all_stems = sorted(all_labels.keys())
-            for stem in all_stems:
-                for name in PARAM_NAMES:
-                    all_labels[stem][name] = torch.cat(all_labels[stem][name])
-            elapsed = time.perf_counter() - t0
-            print(f"  done in {elapsed:.4f} s — saving cache to {labels_cache}")
-            torch.save({"stems": all_stems, "labels": all_labels}, labels_cache)
+        available_stems = sorted({p.stem for p in self.sound_dir.glob("*.wav")})
+        n_files = len(available_stems)
+        print(f"Loading reference values from {self.references_path}...")
+        t0 = time.perf_counter()
+        refs = load_references_grouped(self.references_path)
+        print(f"  parsed in {time.perf_counter() - t0:.4f} s")
+        self.refs = refs
 
-        # Filter to only the stems whose WAV file actually exists in sound_dir.
-        # Necessary after split_train_val.py has moved files into train/ or
-        # val/ subfolders — the cached/parsed label list still references
-        # ALL original stems, regardless of which physical folder they now
-        # live in.
-        available_stems = {p.stem for p in self.sound_dir.glob("*.wav")}
-        missing_before_filter = len(all_stems)
-        all_stems = [s for s in all_stems if s in available_stems]
-        n_filtered = missing_before_filter - len(all_stems)
-        if n_filtered > 0:
-            print(f"  Filtered out {n_filtered} stems not present in {self.sound_dir} "
-                  f"(likely moved to a different split folder)")
+        segment_stems = collect_segment_stems(
+            self.sound_dir.parent / "raw_sound_files_1s"
+        )
+        offsets = segment_local_offsets(segment_stems) if segment_stems else None
+        print(f"  built local segment mapping for {len(offsets) if offsets else 0} segments")
 
+        all_labels = build_labels_for_stems(refs, available_stems, offsets=offsets)
+        all_labels = {
+            stem: {name: torch.from_numpy(vals) for name, vals in seg.items()}
+            for stem, seg in all_labels.items()
+        }
+        if len(all_labels) < n_files:
+            print(f"  Note: found reference data for {len(all_labels)} of {n_files} segments "
+                  f"in {self.sound_dir}")
+
+        all_stems = sorted(all_labels.keys())
         if subset_indices is not None:
             self.stems = [all_stems[i] for i in subset_indices]
             self._labels = {s: all_labels[s] for s in self.stems}
         else:
             self.stems = all_stems
-            self._labels = {s: all_labels[s] for s in self.stems}
+            self._labels = all_labels
 
         audio_cache = self.sound_dir / "_audio_cache.pt"
         if audio_cache.exists():
@@ -201,20 +224,38 @@ def _collate(
     return waveform_batch, targets
 
 
+def _align_to_model_grid(target: torch.Tensor, n_pred: int) -> torch.Tensor:
+    """Map a per-parameter target onto the model's output grid (``n_pred`` frames).
+
+    Labels live on the 2 ms time grid (500 frames/s), but sparse parameters only
+    sample it every few frames (roughness at 0, 50, ..., 450; tnr at 0, 250;
+    sii at 0). Slicing ``target[..., :n_pred]`` would keep only the first sample
+    of such parameters, leaving most predictions unsupervised. Instead each
+    prediction index ``j`` is compared to the label frame ``round(j * n / n_pred)``
+    it represents (identity when the lengths already match).
+    """
+    n = target.shape[-1]
+    if n == n_pred:
+        return target
+    frame = (torch.arange(n_pred, device=target.device) * n / n_pred).round().long().clamp_max(n - 1)
+    return target[..., frame]
+
+
 def _training_step(
     model: torch.nn.Module,
     waveform: torch.Tensor,
     targets: dict[str, torch.Tensor],
     optimizer: torch.optim.Optimizer,
     device: torch.device,
+    vector_wise: bool = True,
 ) -> dict[str, float]:
     """Single forward-backward-update step for one batch."""
     waveform = waveform.to(device)
     targets = {name: t.to(device) for name, t in targets.items()}
     preds = model(waveform)
-    trimmed = {name: targets[name][:, :preds[name].shape[-1]]
+    trimmed = {name: _align_to_model_grid(targets[name], preds[name].shape[-1])
                for name in PARAM_NAMES}
-    losses = compute_loss(model, preds, trimmed)
+    losses = compute_loss(model, preds, trimmed, vector_wise=vector_wise)
     optimizer.zero_grad()
     losses["total"].backward()
     optimizer.step()
@@ -250,7 +291,7 @@ def _save_runtime_csv(output_dir: Path, stem: str, meta: dict, preds: dict[str, 
     for name in PARAM_NAMES:
         p = preds[name][0]
         if targets is not None:
-            t = targets[name][:p.shape[-1]]
+            t = _align_to_model_grid(targets[name], p.shape[-1])
             mask = ~torch.isnan(t)
             if mask.any():
                 p = p[mask]
@@ -270,7 +311,7 @@ def _save_prediction_plots(output_dir: Path, stem: str, preds: dict[str, torch.T
     prefix = f"{epoch_tag}_" if epoch_tag else ""
     for name in PARAM_NAMES:
         p = preds[name][0]
-        t = target[name][:p.shape[-1]]
+        t = _align_to_model_grid(target[name], p.shape[-1])
 
         p_np, t_np = p.cpu().numpy(), t.numpy()
         n_frames = len(p_np)
@@ -297,7 +338,7 @@ def _save_comparison_csv(output_dir: Path, stem: str, preds: dict[str, torch.Ten
     all_arrays: dict[str, np.ndarray] = {}
     for name in PARAM_NAMES:
         p = preds[name][0]
-        t = target[name][:p.shape[-1]]
+        t = _align_to_model_grid(target[name], p.shape[-1])
         p_np = p.cpu().numpy().copy()
         p_np[np.isnan(t.numpy())] = np.nan
         all_arrays[f"{name}_target"] = t.numpy()
@@ -310,259 +351,40 @@ def _save_comparison_csv(output_dir: Path, stem: str, preds: dict[str, torch.Ten
     pd.DataFrame(df_dict).to_csv(output_dir / f"{prefix}{stem}_comparison.csv", index=False)
 
 
-def _benchmark_model(
-    model: torch.nn.Module,
-    inp: torch.Tensor,
-    n_warmup: int = 10000,
-    n_measure: int = 10000,
-) -> dict[str, float]:
-    """Benchmark model(inp) with warmup and return timing statistics in ms."""
-    with torch.no_grad():
-        for _ in range(n_warmup):
-            model(inp)
-
-        gc.collect()
-        gc.disable()
-        times: list[float] = []
-        for _ in range(n_measure):
-            t0 = time.perf_counter()
-            model(inp)
-            t1 = time.perf_counter()
-            times.append(t1 - t0)
-        gc.enable()
-
-    times_ms = [t * 1000 for t in times]
-    avg = sum(times_ms) / len(times_ms)
-    mn = min(times_ms)
-    mx = max(times_ms)
-    std = (sum((t - avg) ** 2 for t in times_ms) / len(times_ms)) ** 0.5
-    sorted_times = sorted(times_ms)
-    n = len(sorted_times)
-    med = (sorted_times[n // 2] if n % 2 == 1 else (sorted_times[n // 2 - 1] + sorted_times[n // 2]) / 2)
-    min_idx = times_ms.index(mn) + 1
-    max_idx = times_ms.index(mx) + 1
-    return {"avg_ms": avg, "min_ms": mn, "max_ms": mx, "std_ms": std, "median_ms": med,
-            "min_idx": min_idx, "max_idx": max_idx, "n": n, "times_ms": times_ms}
-
-
-def _format_benchmark(stats: dict[str, float], label: str = "model_inference") -> str:
-    return (
-        f"  {label:.<30s} avg {stats['avg_ms']:.3f} ms  "
-        f"med {stats['median_ms']:.3f} ms  "
-        f"min {stats['min_ms']:.3f} ms (#{int(stats['min_idx'])})  "
-        f"max {stats['max_ms']:.3f} ms (#{int(stats['max_idx'])})  "
-        f"std {stats['std_ms']:.3f} ms  (n={int(stats['n'])})"
-    )
-
-
-def _plot_benchmark(stats: dict[str, float], output_path: Path, epoch_tag: str = ""):
-    """Violin + jittered scatter plot of inference times with percentile lines."""
-    times = sorted(stats["times_ms"])
-    n = len(times)
-    mn = times[0]
-    p50 = times[n // 2] if n % 2 == 1 else (times[n // 2 - 1] + times[n // 2]) / 2
-    p95 = times[int(n * 0.95)]
-    p99 = times[int(n * 0.99)]
-    mx = times[-1]
-
-    cmap = plt.cm.magma
-    colors = [cmap(v) for v in np.linspace(0.15, 0.85, 5)]
-
-    fig, ax = plt.subplots(figsize=(5, 5))
-    parts = ax.violinplot(times, positions=[0], showmeans=False, showmedians=False, showextrema=False)
-    for pc in parts["bodies"]:
-        pc.set_facecolor("tab:blue")
-        pc.set_alpha(0.25)
-
-    jitter = np.random.default_rng(42).uniform(-0.08, 0.08, size=n)
-    ax.scatter(jitter, times, s=6, alpha=0.5, color="tab:blue", zorder=3)
-
-    ax.set_xlim(-0.5, 0.5)
-    ax.set_xticks([])
-    ax.set_ylabel("Inference time (ms)")
-
-    tick_vals, tick_labels = [], []
-    for (label, val), color in zip(
-        [("Max", mx), ("P99", p99), ("P95", p95), ("P50", p50), ("Min", mn)],
-        colors,
-    ):
-        ax.axhline(val, color=color, linewidth=1.5, zorder=4,
-                    label=f"{label} = {val:.3f} ms")
-        tick_vals.append(val)
-        tick_labels.append(f"{label}")
-
-    ax2 = ax.twinx()
-    ax2.set_ylim(ax.get_ylim())
-    ax2.set_yticks(tick_vals)
-    ax2.set_yticklabels(tick_labels)
-    ax2.tick_params(axis="y", which="minor", right=False)
-    ax2.spines["left"].set_visible(False)
-    ax.legend(loc="upper left")
-    title = f"Inference benchmark  ({epoch_tag})" if epoch_tag else "Inference benchmark"
-    ax.set_title(title)
-    fig.tight_layout()
-    fig.savefig(output_path)
-    plt.close(fig)
-
-
-def _save_benchmark_csv(output_dir: Path, stem: str, stats: dict[str, float], epoch_tag: str = ""):
-    """Save per-iteration timing results to CSV."""
-    prefix = f"{epoch_tag}_" if epoch_tag else ""
-    rows = []
-    for i, t in enumerate(stats["times_ms"], 1):
-        rows.append({"iteration": i, "time_ms": round(t, 6)})
-    df = pd.DataFrame(rows)
-    summary = {
-        "iteration": "summary",
-        "time_ms": None,
-        "avg_ms": round(stats["avg_ms"], 6),
-        "median_ms": round(stats["median_ms"], 6),
-        "min_ms": round(stats["min_ms"], 6),
-        "max_ms": round(stats["max_ms"], 6),
-        "std_ms": round(stats["std_ms"], 6),
-        "min_idx": int(stats["min_idx"]),
-        "max_idx": int(stats["max_idx"]),
-        "n": int(stats["n"]),
-    }
-    df = pd.concat([df, pd.DataFrame([summary])], ignore_index=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    df.to_csv(output_dir / f"{prefix}{ts}_{stem}_benchmark_timing.csv", index=False)
-
-
-def _compare_epoch(
-    dataset: PsychoAcousticDataset,
-    checkpoint_dir: Path,
-    output_dir: Path,
-    n_samples: int = 1,
-    device: torch.device | None = None,
-    epoch: int | str = "newest",
-    epoch_tag: str = "",
-    n_benchmark: int = 50,
-):
-    """Run inference with a specific epoch checkpoint and save plots + CSVs."""
-    if device is None:
-        device = _get_device()
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    stats_path = Path(__file__).parent.parent / "data" / "standardized_audio_files" / "training_set" / "visualization" / "parameter_average_per_time_segment_train.csv"
-
-    biases = _load_time_biases(stats_path)
-    model = PsychoacousticModel(initial_temporal_biases=biases).to(device)
-    if epoch == "newest":
-        ckpt_files = sorted(Path(checkpoint_dir).glob("epoch_*.pt"))
-        if not ckpt_files:
-            print("No checkpoint found — skipping comparison")
-            return
-        ckpt_path = ckpt_files[-1]
-    else:
-        ckpt_path = Path(checkpoint_dir) / f"epoch_{epoch:04d}.pt"
-        if not ckpt_path.exists():
-            print(f"Checkpoint {ckpt_path.name} not found — skipping")
-            return
-
-    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-    model.load_state_dict(ckpt["model_state_dict"])
-    model.eval()
-    if not epoch_tag or epoch_tag == "newest":
-        epoch_tag = ckpt_path.stem
-    print(f"Loaded {ckpt_path.name} for comparison")
-
-    with torch.no_grad():
-        for idx in range(len(dataset)):
-            waveform, target = dataset[idx]
-            inp = waveform.unsqueeze(0).to(device)
-
-            preds = model(inp)
-
-            stats = _benchmark_model(model, inp, n_measure=n_benchmark)
-            backbone_out = model.backbone(inp)
-            stem = dataset.stems[idx]
-
-            meta = {
-                "file": f"{stem}.wav",
-                "input_samples": inp.shape[-1],
-                "input_duration_s": round(inp.shape[-1] / 48000, 2),
-                "inference_time_avg_ms": round(stats["avg_ms"], 3),
-                "inference_time_median_ms": round(stats["median_ms"], 3),
-                "inference_time_min_ms": round(stats["min_ms"], 3),
-                "inference_time_min_idx": int(stats["min_idx"]),
-                "inference_time_max_ms": round(stats["max_ms"], 3),
-                "inference_time_max_idx": int(stats["max_idx"]),
-                "inference_time_std_ms": round(stats["std_ms"], 3),
-                "inference_time_n": int(stats["n"]),
-                "backbone_frames": backbone_out.shape[-1],
-            }
-            _save_runtime_csv(output_dir, stem, meta, preds, epoch_tag, targets=target)
-            _save_prediction_plots(output_dir, stem, preds, target, epoch_tag)
-            _save_comparison_csv(output_dir, stem, preds, target, epoch_tag)
-            prefix = f"{epoch_tag}_" if epoch_tag else ""
-            _plot_benchmark(stats, output_dir / f"{prefix}{stem}_benchmark.png", epoch_tag=epoch_tag)
-            _save_benchmark_csv(output_dir, stem, stats, epoch_tag)
-
-    print(f"Comparison saved to {output_dir}")
-    print(_format_benchmark(stats))
-
-
-class _DatasetView(Dataset):
-    """Lightweight view over a subset of a PsychoAcousticDataset, sharing the underlying data."""
-    def __init__(self, dataset: PsychoAcousticDataset, indices: list[int]):
-        n = len(dataset)
-        for i in indices:
-            if not 0 <= i < n:
-                raise IndexError(
-                    f"subset index {i} is out of range for dataset of size {n}"
-                )
-        self._dataset = dataset
-        self._indices = indices
-        self.stems = [dataset.stems[i] for i in indices]
-
-    def __len__(self) -> int:
-        return len(self._indices)
-
-    def __getitem__(self, idx: int):
-        return self._dataset[self._indices[idx]]
-
-
 def run_comparison(
-    sound_dir: Path,
-    labels_csv_path: Path,
+    test_sound_dir: Path,
+    references_path: Path,
     checkpoint_dir: Path,
-    n_samples: int = 1,
-    device_id: int = 0,
-    subset_indices: list[int] | None = None,
-    epochs: list[int | str] | None = None,
-    dataset: PsychoAcousticDataset | None = None,
+    output_dir: Path | None = None,
     audio_workers: int = 0,
-    n_benchmark: int = 50,
-):
-    """Run inference on specified epochs and save plots/CSVs.
+    device: torch.device | None = None,
+) -> dict[str, int] | None:
+    """Compare the newest checkpoint against the full (unused) test set.
 
-    Parameters
-    ----------
-    epochs : list[int | str] | None
-        Epoch numbers to compare. Use "newest" for the latest checkpoint.
-        Defaults to [0, "newest"].
+    Produces a single reference-vs-prediction scatter per parameter over all
+    segments in ``test_sound_dir``, with both axes in % of the parameter's
+    global reference maximum. Returns per-parameter point counts (None if no
+    checkpoint exists).
     """
-    if epochs is None:
-        epochs = [0, "newest"]
-    print("=" * 100)
-    device = _get_device(device_id)
-    if subset_indices is not None:
-        if dataset is not None:
-            dataset = _DatasetView(dataset, subset_indices)
-        else:
-            dataset = PsychoAcousticDataset(sound_dir, labels_csv_path, subset_indices=subset_indices,
-                                            audio_workers=audio_workers)
-    elif dataset is None:
-        dataset = PsychoAcousticDataset(sound_dir, labels_csv_path, audio_workers=audio_workers)
-    output_dir = Path(__file__).resolve().parent / "comparison"
+    from .reference_vs_prediction import plot_reference_vs_prediction_test
+
+    if output_dir is None:
+        output_dir = Path(__file__).resolve().parent / "comparison"
+    output_dir = Path(output_dir)
     if output_dir.exists():
         shutil.rmtree(output_dir)
-    for ep in epochs:
-        tag = f"epoch_{ep:04d}" if isinstance(ep, int) else ""
-        _compare_epoch(dataset, checkpoint_dir, output_dir, n_samples, device=device, epoch=ep, epoch_tag=tag, n_benchmark=n_benchmark)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    counts = plot_reference_vs_prediction_test(
+        Path(test_sound_dir),
+        references_path,
+        checkpoint_dir,
+        output_dir,
+        audio_workers=audio_workers,
+        device=device,
+    )
     hold_plot()
+    return counts
 
 
 def _log_epoch(
@@ -594,7 +416,7 @@ def _log_epoch(
 
 def train_model(
     sound_dir: Path,
-    labels_csv_path: Path,
+    references_path: Path,
     checkpoint_dir: Path,
     losses_dir: Path,
     epochs: int = 2,
@@ -608,6 +430,7 @@ def train_model(
     val_sound_dir: Path | None = None,
     val_dataset: PsychoAcousticDataset | None = None,
     use_scheduler: bool = True,
+    vector_loss: bool = True,
 ) -> list[dict[str, float]]:
     print("=" * 100)
     device = _get_device(device_id)
@@ -620,8 +443,7 @@ def train_model(
     plot_path = losses_dir / "losses.png"
 
     # ── Model ──
-    stats_path = Path(__file__).parent.parent / "data" / "standardized_audio_files" / "training_set" / "visualization" / "parameter_average_per_time_segment_train.csv"
-    biases = _load_time_biases(stats_path)
+    biases = _load_time_biases(_BIAS_STATS_PATH)
     model = PsychoacousticModel(initial_temporal_biases=biases).to(device)
     optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=0.9)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", patience=10, factor=0.5) if use_scheduler else None
@@ -651,7 +473,7 @@ def train_model(
 
     # ── Dataset ──
     if dataset is None:
-        dataset = PsychoAcousticDataset(sound_dir, labels_csv_path, subset_indices=subset_indices, audio_workers=audio_workers)
+        dataset = PsychoAcousticDataset(sound_dir, references_path, subset_indices=subset_indices, audio_workers=audio_workers)
     if len(dataset) == 0:
         print("No data found — nothing to train on.")
         return []
@@ -659,7 +481,7 @@ def train_model(
 
     # ── Validation dataset (physically separate folder, see split_train_val.py) ──
     if val_dataset is None and val_sound_dir is not None:
-        val_dataset = PsychoAcousticDataset(val_sound_dir, labels_csv_path, audio_workers=audio_workers)
+        val_dataset = PsychoAcousticDataset(val_sound_dir, references_path, audio_workers=audio_workers)
     if val_dataset is None or len(val_dataset) == 0:
         print("No validation data found — proceeding without validation.")
         val_dataset = None
@@ -694,7 +516,7 @@ def train_model(
         t_batch_start = time.perf_counter()
         epoch_losses: list[dict[str, float]] = []
         for batch_idx, (waveform, targets) in enumerate(loader):
-            losses = _training_step(model, waveform, targets, optimizer, device)
+            losses = _training_step(model, waveform, targets, optimizer, device, vector_wise=vector_loss)
             epoch_losses.append(losses)
             if (batch_idx + 1) % 100 == 0:
                 print(f"  batch {batch_idx + 1}/{n_batches} ({time.perf_counter() - t_batch_start:.4f}s)")
@@ -715,8 +537,9 @@ def train_model(
                     waveform = waveform.to(device)
                     targets = {n: t.to(device) for n, t in targets.items()}
                     preds = model(waveform)
-                    trimmed = {n: targets[n][:, :preds[n].shape[-1]] for n in PARAM_NAMES}
-                    v_losses = compute_loss(model, preds, trimmed)
+                    trimmed = {n: _align_to_model_grid(targets[n], preds[n].shape[-1])
+                               for n in PARAM_NAMES}
+                    v_losses = compute_loss(model, preds, trimmed, vector_wise=vector_loss)
                     val_losses_epoch.append({k: v.item() for k, v in v_losses.items()})
             model.train()
 

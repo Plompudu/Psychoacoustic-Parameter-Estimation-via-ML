@@ -60,7 +60,7 @@ class PsychoacousticModel(nn.Module):
             nn.MaxPool1d(kernel_size=2, stride=2),
         )
 
-        MAX = [500, 500, 9, 2, 1]
+        MAX = [500, 500, 10, 2, 1]
         self.heads = nn.ModuleDict()
         for i, name in enumerate(PARAM_NAMES):
             self.heads[name] = nn.Sequential(
@@ -148,13 +148,11 @@ def _load_model(device: torch.device) -> PsychoacousticModel:
     stats_path = (
         _REPO
         / "data"
-        / "standardized_audio_files"
-        / "training_set"
-        / "visualization"
-        / "parameter_average_per_time_segment_train.csv"
+        / "reference_values"
+        / "median_1s_chunk.csv"
     )
     df = pd.read_csv(stats_path)
-    counts = [500, 500, 9, 2, 1]
+    counts = [500, 500, 10, 2, 1]
     biases: dict[str, torch.Tensor] = {}
     for i, name in enumerate(PARAM_NAMES):
         vals = df[name].dropna().values.astype(np.float32)

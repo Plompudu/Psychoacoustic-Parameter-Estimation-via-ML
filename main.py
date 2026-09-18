@@ -1,88 +1,71 @@
 from pathlib import Path
 
-from data_preprocessing.calculate_reference_values import calculate_reference_values
-from data_preprocessing.convert_to_wav import convert_to_wav
+# from data_preprocessing.calculate_reference_values import calculate_reference_values
+# from data_preprocessing.convert_to_wav import convert_to_wav
 from DL_model.train_model import train_model, run_comparison
 from DL_model.train_model import PsychoAcousticDataset
+from DL_model.benchmark import run_benchmark
 
 
 def main():
-    root = Path("data") / "standardized_audio_files" / "training_set"
-    raw_dir = Path("data") / "raw_audio_files"
-    sound_dir = root / "sound_files"
-    train_dir = sound_dir / "train"    
-    val_dir = sound_dir / "val"
-    labels_csv_path = root / "all_psychoacoustic_labels.csv"
+    train_dir = Path("data") / "training_set"
+    val_dir = Path("data") / "validation_set"
+    test_dir = Path("data") / "test_set"
+    references_path = Path("data") / "reference_values" / "references.csv"
     checkpoint_dir = Path("DL_model") / "epochs"
     losses_dir = Path("DL_model") / "losses"
 
-    # convert_to_wav(
-    #     input_folder=raw_dir,
-    #     output_folder=sound_dir,
-    #     fs=48000,
-    #     win_length_samples=1,
-    #     number_samples=None
-    # )
 
-    # calculate_reference_values(
-    #     input_folder=sound_dir,
-    #     output_folder=labels_dir
-    # )
-
-
-    # len = 128
-    # len_val = round(0.2 * len)
     dataset = PsychoAcousticDataset(
         train_dir,
-        labels_csv_path,
+        references_path,
         # subset_indices=list(range(len)),
         audio_workers=12
     )
 
     val_dataset = PsychoAcousticDataset(
-        val_dir, labels_csv_path,
+        val_dir, references_path,
         # subset_indices=list(range(len_val)),
         audio_workers=12
     )
+
+    #0-95 batch size 128, variance normalized RMSE
+    #96-122 batch size 32, variance normalized RMSE
+    #0-100 batch size 32, vector - "Also fixed the validation loop, which still had the old misaligned targets[n][:, :preds[n].shape[-1]] trim — it now uses _align_to_model_grid like the training step"
 
     train_model(
         sound_dir=train_dir,
         val_sound_dir=val_dir,
         val_dataset=val_dataset,
-        labels_csv_path=labels_csv_path,
+        references_path=references_path,
         checkpoint_dir=checkpoint_dir,
         losses_dir=losses_dir,
-        epochs=100,
+        epochs=200,
         lr=1e-3,
-        batch_size=128,
+        batch_size=32,
         device_id=0,
         num_workers=0,
         use_scheduler=True,
         dataset=dataset,
+        vector_loss=True
     )
 
-  #Epoch 51/100 — loss: 50.812763 — val_loss: 51.131187 — 116.0714s
-  # current lr: 0.000008
-  # batch 100/483 (24.1882s)
-  # batch 200/483 (24.0658s)
-  # batch 300/483 (24.0510s)
-  # batch 400/483 (24.0514s)
 
-# ab 51 ohne 0.5 when stalled - lr = 0.001 constant
-
-    # subset_indices = [0]
-    subset_indices = [3]
     run_comparison(
-        sound_dir=sound_dir,
-        labels_csv_path=labels_csv_path,
+        test_sound_dir=test_dir,
+        references_path=references_path,
         checkpoint_dir=checkpoint_dir,
-        n_samples=1,
-        device_id=0,
-        subset_indices=subset_indices,
-        epochs=[0, "newest"],
-        dataset=dataset,
-        n_benchmark=10000
     )
+
+    # benchmark_dataset = PsychoAcousticDataset(
+    #     test_dir, references_path, audio_workers=12
+    # )
+    # run_benchmark(
+    #     benchmark_dataset,
+    #     checkpoint_dir=checkpoint_dir,
+    #     output_dir=Path("DL_model") / "comparison",
+    #     n_benchmark=50,
+    # )
 
 
 
