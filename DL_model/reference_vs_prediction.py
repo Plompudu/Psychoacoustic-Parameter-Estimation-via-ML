@@ -7,13 +7,11 @@ import torch
 
 from .params import PARAM_NAMES
 
-PARAM_COLORS = {
-    "loudness_zwtv": "tab:blue",
-    "sharpness_din_tv": "tab:green",
-    "roughness_dw": "tab:orange",
-    "tnr_ecma_perseg": "tab:purple",
-    "sii_ansi": "tab:brown",
-}
+def param_colors() -> dict[str, tuple[float, float, float, float]]:
+    """Distinct cool colormap (blue → pink) color per parameter."""
+    cmap = plt.cm.cool_r
+    positions = np.linspace(0.0, 1.0, len(PARAM_NAMES))
+    return {name: cmap(p) for name, p in zip(PARAM_NAMES, positions)}
 
 
 def global_reference_max(refs: dict[str, pd.DataFrame]) -> dict[str, float]:
@@ -114,38 +112,82 @@ def plot_reference_vs_prediction(
     counts = {name: len(v[1]) for name, v in points.items()}
     print(f"  reference-vs-prediction points: {counts}")
 
-    fig, ax = plt.subplots(figsize=(8, 8))
+    colors = param_colors()
+
+    # ── Image 1: all parameters overlaid in a single plot ──
+    fig_combined, ax_combined = plt.subplots(figsize=(9, 9))
     for name in PARAM_NAMES:
         t = np.asarray(points[name][1], dtype=float)
         p = np.asarray(points[name][0], dtype=float)
         if t.size == 0:
             continue
         scale = scales[name]
-        ax.scatter(
+        ax_combined.scatter(
             t / scale * 100.0,
             p / scale * 100.0,
             s=5,
             alpha=0.4,
-            color=PARAM_COLORS[name],
-            label=f"{name} (n={t.size})",
+            color=colors[name],
+            label=f"{name} (n={t.size}, max_ref={scale:.5g})",
         )
-    ax.plot([0, 100], [0, 100], color="red", linestyle="--",
-            linewidth=2, label="0% Error Prediction")
-    ax.set_xlim(0, 100)
-    ax.set_ylim(0, 100)
-    ax.set_xlabel("Reference value [% of max]")
-    ax.set_ylabel("Model prediction [% of max]")
-    ax.set_title(
-        f"Reference vs. prediction — {ckpt_path.stem} ({dev_name})"
-    )
-    ax.grid(True, alpha=0.3)
-    ax.legend(fontsize=8, loc="upper left")
-    fig.tight_layout()
+    ax_combined.plot([0, 100], [0, 100], color="red", linestyle="--",
+                     linewidth=2, label="0% Error Prediction")
+    all_pct_p = np.concatenate([
+        np.asarray(points[name][0], dtype=float) / scales[name] * 100.0
+        for name in PARAM_NAMES if points[name][1]
+    ])
+    ymax = max(100.0, float(np.nanmax(all_pct_p)) * 1.05) if all_pct_p.size else 100.0
+    ax_combined.set_xlim(0, 100)
+    ax_combined.set_ylim(0, ymax)
+    ax_combined.set_xlabel("Reference value [% of ref max]")
+    ax_combined.set_ylabel("Model prediction [% of ref max]")
+    ax_combined.set_title(f"Reference vs. prediction — all parameters — {ckpt_path.stem} ({dev_name})")
+    ax_combined.grid(True, alpha=0.3)
+    ax_combined.legend(fontsize=9, loc="upper left")
+    fig_combined.tight_layout()
 
-    output_path = Path(output_dir) / "reference_vs_prediction.png"
-    fig.savefig(output_path, dpi=200)
-    plt.close(fig)
-    print(f"Saved: {output_path}")
+    combined_path = Path(output_dir) / "reference_vs_prediction_combined.png"
+    fig_combined.savefig(combined_path, dpi=200)
+    plt.close(fig_combined)
+    print(f"Saved: {combined_path}")
+
+    # ── Image 2: one panel per parameter ──
+    fig_per, axes = plt.subplots(2, 3, figsize=(14, 8))
+    for ax, name in zip(axes.ravel(), PARAM_NAMES):
+        t = np.asarray(points[name][1], dtype=float)
+        p = np.asarray(points[name][0], dtype=float)
+        scale = scales[name]
+        if t.size == 0:
+            ax.set_visible(False)
+            continue
+
+        pct_t = t / scale * 100.0
+        pct_p = p / scale * 100.0
+        ax.scatter(pct_t, pct_p, s=5, alpha=0.4, color=colors[name])
+        ax.plot([0, 100], [0, 100], color="red", linestyle="--",
+                linewidth=2, label="0% Error Prediction")
+
+        ymax = max(100.0, float(np.nanmax(pct_p)) * 1.05) if pct_p.size else 100.0
+        ax.set_xlim(0, 100)
+        ax.set_ylim(0, ymax)
+        ax.set_xlabel("Reference [% of ref max]")
+        ax.set_ylabel("Prediction [% of ref max]")
+        ax.set_title(name, fontsize=10)
+        ax.grid(True, alpha=0.3)
+        ax.legend(
+            [f"n = {t.size}, max_ref = {scale:.5g}", "0% Error Prediction"],
+            loc="upper left",
+            fontsize=9,
+        )
+
+    axes.ravel()[-1].set_visible(False)
+    fig_per.suptitle(f"Reference vs. prediction per parameter — {ckpt_path.stem} ({dev_name})")
+    fig_per.tight_layout()
+
+    per_path = Path(output_dir) / "reference_vs_prediction_per_parameter.png"
+    fig_per.savefig(per_path, dpi=200)
+    plt.close(fig_per)
+    print(f"Saved: {per_path}")
     return counts
 
 
