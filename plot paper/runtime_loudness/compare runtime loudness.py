@@ -46,9 +46,11 @@ for name, times in samples.items():
     print(f"{name:<24} median {np.median(times):>8.2f} ms  (min {min(times):.2f} / max {max(times):.2f})")
 
 fig, ax = plt.subplots(figsize=(8, 5))
-ax.boxplot(list(samples.values()), tick_labels=list(samples.keys()))
+ax.boxplot(list(samples.values()), tick_labels=list(samples.keys()),
+           patch_artist=True, boxprops=dict(facecolor=plt.cm.cool(0.5)),
+           medianprops=dict(color=plt.cm.cool(1.0), linewidth=2.5))
 ax.set_ylabel("runtime [ms]")
-ax.set_title(f"Runtime comparison ({DURATION}s white noise @ {SR} Hz)")
+# ax.set_title(f"Runtime comparison ({DURATION}s white noise @ {SR} Hz)")
 ax.set_yscale("log")
 ax.grid(axis="y", linestyle="--", alpha=0.5)
 out = Path(__file__).parent / "runtime comparison.png"

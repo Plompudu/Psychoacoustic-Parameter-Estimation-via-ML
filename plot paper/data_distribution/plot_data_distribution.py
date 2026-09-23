@@ -211,8 +211,8 @@ def plot_chunk_spread(stats: dict[str, pd.DataFrame]):
         ax.fill_between(ms, p0, p100, color="#cfcfcf", alpha=0.6, label="0th–100th")
         ax.fill_between(ms, p5, p95,  color="#9f9f9f", alpha=0.6, label="5th–95th")
         ax.fill_between(ms, p25, p75, color="#6f6f6f", alpha=0.7, label="25th–75th")
-        ax.plot(ms, mean,   color="deeppink", linewidth=1.1, label="Mean")
-        ax.plot(ms, median, color="darkblue", linewidth=1.3, label="Median")
+        ax.plot(ms, mean,   color=plt.cm.cool(0.5), linewidth=2.5, label="Mean")
+        ax.plot(ms, median, color=plt.cm.cool(1.0), linewidth=2.5, label="Median")
 
         ax.set_xlim(0, CHUNK_MS)
         if name in bottom_row:

@@ -18,6 +18,8 @@ _REPO = _DIR.parent
 
 sys.path.insert(0, str(_REPO))
 
+from DL_model.reference_vs_prediction import param_colors  # noqa: E402
+
 PARAM_NAMES = [
     "loudness_zwtv",
     "sharpness_din_tv",
@@ -98,13 +100,7 @@ PARAM_UNITS = {
     "tnr_ecma_perseg": "dB",
     "sii_ansi": "",
 }
-PARAM_COLORS = {
-    "loudness_zwtv": "#00bfff",
-    "sharpness_din_tv": "#ff6b6b",
-    "roughness_dw": "#51cf66",
-    "tnr_ecma_perseg": "#ffd43b",
-    "sii_ansi": "#cc5de8",
-}
+PARAM_COLORS = param_colors()
 
 SAMPLE_RATE = 48000
 CHUNK_SAMPLES = SAMPLE_RATE  # 1 second
@@ -123,7 +119,7 @@ FILTER_TAU = {
     "direct": 0.0,            # 0 ms — no averaging, only new frames appended
     "direct_overwrite": 0.0,  # 0 ms — no averaging, past frames overwritten
     "impulse": 0.035,         # 35 ms
-    "fast": 0.100,            # 100 ms
+    "fast": 0.125,            # 125 ms
     "slow": 1.000,            # 1000 ms
 }
 FILTER_KEYS = {

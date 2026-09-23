@@ -1,3 +1,4 @@
+import argparse
 import sys
 from pathlib import Path
 
@@ -16,8 +17,14 @@ AUDIO_WORKERS = 12
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--epoch", type=int, default=547,
+                        help="checkpoint epoch to load (default: newest)")
+    args = parser.parse_args()
+
     gathered = plot_reference_vs_prediction_test(
-        TEST_DIR, REFERENCE_PATH, CHECKPOINT_DIR, OUTPUT_DIR, audio_workers=AUDIO_WORKERS
+        TEST_DIR, REFERENCE_PATH, CHECKPOINT_DIR, OUTPUT_DIR,
+        audio_workers=AUDIO_WORKERS, epoch=args.epoch,
     )
     if gathered is None:
         print("No checkpoint found in", CHECKPOINT_DIR)

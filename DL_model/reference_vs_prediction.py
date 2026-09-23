@@ -54,6 +54,7 @@ def plot_reference_vs_prediction(
     checkpoint_dir: Path,
     output_dir: Path,
     device: torch.device | None = None,
+    epoch: int | None = None,
 ) -> dict[str, int] | None:
     """Scatter of reference-vs-prediction points per parameter for ``dataset``.
 
@@ -70,6 +71,9 @@ def plot_reference_vs_prediction(
     )
 
     ckpt_files = sorted(Path(checkpoint_dir).glob("epoch_*.pt"))
+    if epoch is not None:
+        ckpt_files = [p for p in ckpt_files
+                      if p.stem in (f"epoch_{epoch:04d}", f"epoch_{epoch}")]
     if not ckpt_files:
         print("No checkpoint found — skipping reference-vs-prediction plot")
         return None
@@ -130,8 +134,8 @@ def plot_reference_vs_prediction(
             color=colors[name],
             label=f"{name} (n={t.size}, max_ref={scale:.5g})",
         )
-    ax_combined.plot([0, 100], [0, 100], color="red", linestyle="--",
-                     linewidth=2, label="0% Error Prediction")
+    ax_combined.plot([0, 100], [0, 100], color="black", linestyle="--",
+                     linewidth=2.5, alpha=0.7, label="0% Error Prediction")
     all_pct_p = np.concatenate([
         np.asarray(points[name][0], dtype=float) / scales[name] * 100.0
         for name in PARAM_NAMES if points[name][1]
@@ -141,7 +145,7 @@ def plot_reference_vs_prediction(
     ax_combined.set_ylim(0, ymax)
     ax_combined.set_xlabel("Reference value [% of ref max]")
     ax_combined.set_ylabel("Model prediction [% of ref max]")
-    ax_combined.set_title(f"Reference vs. prediction — all parameters — {ckpt_path.stem} ({dev_name})")
+    # ax_combined.set_title(f"Reference vs. prediction — all parameters — {ckpt_path.stem} ({dev_name})")
     ax_combined.grid(True, alpha=0.3)
     ax_combined.legend(fontsize=9, loc="upper left")
     fig_combined.tight_layout()
@@ -164,8 +168,8 @@ def plot_reference_vs_prediction(
         pct_t = t / scale * 100.0
         pct_p = p / scale * 100.0
         ax.scatter(pct_t, pct_p, s=5, alpha=0.4, color=colors[name])
-        ax.plot([0, 100], [0, 100], color="red", linestyle="--",
-                linewidth=2, label="0% Error Prediction")
+        ax.plot([0, 100], [0, 100], color="black", linestyle="--",
+                linewidth=2.5, alpha=0.7, label="0% Error Prediction")
 
         ymax = max(100.0, float(np.nanmax(pct_p)) * 1.05) if pct_p.size else 100.0
         ax.set_xlim(0, 100)
@@ -198,14 +202,17 @@ def plot_reference_vs_prediction_test(
     output_dir: Path,
     audio_workers: int = 0,
     device: torch.device | None = None,
+    epoch: int | None = None,
 ) -> dict[str, int] | None:
-    """Scatter over the full (unused) test set using the newest checkpoint."""
+    """Scatter over the full (unused) test set using the selected checkpoint."""
     from .train_model import PsychoAcousticDataset
 
     dataset = PsychoAcousticDataset(
         Path(test_sound_dir), references_path, audio_workers=audio_workers
     )
-    return plot_reference_vs_prediction(dataset, checkpoint_dir, output_dir, device=device)
+    return plot_reference_vs_prediction(
+        dataset, checkpoint_dir, output_dir, device=device, epoch=epoch
+    )
 
 
 def main():
