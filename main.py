@@ -45,12 +45,29 @@ def main():
         references_path=references_path,
         checkpoint_dir=checkpoint_dir,
         losses_dir=losses_dir,
-        epochs=10000,
+        epochs=310,
         lr=1e-3,
         batch_size=32,
         device_id=0,
         num_workers=0,
-        use_scheduler=True,
+        use_scheduler=False,
+        dataset=dataset,
+        vector_loss=False,
+    )
+
+    train_model(
+        sound_dir=train_dir,
+        val_sound_dir=val_dir,
+        val_dataset=val_dataset,
+        references_path=references_path,
+        checkpoint_dir=checkpoint_dir,
+        losses_dir=losses_dir,
+        epochs=547,
+        lr=1e-3,
+        batch_size=32,
+        device_id=0,
+        num_workers=0,
+        use_scheduler=False,
         dataset=dataset,
         vector_loss=True,
     )
@@ -69,7 +86,8 @@ def main():
     #     benchmark_dataset,
     #     checkpoint_dir=checkpoint_dir,
     #     output_dir=Path("DL_model") / "comparison",
-    #     n_benchmark=50,
+    #     epoch=547,
+    #     n_benchmark=1,
     # )
 
 

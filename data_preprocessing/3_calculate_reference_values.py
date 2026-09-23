@@ -153,5 +153,5 @@ def calculate_reference_values(input_dir, output_dir, param_configs):
 
 if __name__ == "__main__":
     sys.stdout = _ColorStdout(sys.stdout)
-    # calculate_reference_values(INPUT_DIR, OUTPUT_DIR / "partial_df_1", PARAM_CONFIGS_1)
+    calculate_reference_values(INPUT_DIR, OUTPUT_DIR / "partial_df_1", PARAM_CONFIGS_1)
     calculate_reference_values(INPUT_DIR_1S, OUTPUT_DIR / "partial_df_2", PARAM_CONFIGS_2)
