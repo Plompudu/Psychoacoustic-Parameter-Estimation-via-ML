@@ -52,7 +52,6 @@ The repo also contains the full data-preprocessing pipeline (segmentation, 70/15
       - input: data/reference_values/references.csv
       - output: plot paper/data_distribution (histograms.png, mean/median_1000ms_chunk.csv + .png, average_1000ms_chunk.png, chunk_spread_1000ms.png)
 
-      ![histograms](plot%20paper/data_distribution/histograms.png)
       ![chunk_spread_1000ms](plot%20paper/data_distribution/chunk_spread_1000ms.png)
 
    2. reference_vs_prediction: reference vs predicted parameters per test segment (uses per default epoch 547)
